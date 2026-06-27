@@ -1,28 +1,28 @@
 package control;
 import java.io.IOException;
-import java.lang.annotation.ElementType;
 import java.io.PrintWriter;
 import java.util.List;
 
 import annotation.Controller;
-import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.annotation.WebServlet;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import utils.Mapping;
 import utils.Utilitaires;
 
 @WebServlet("/")
 public class FrontServlet extends HttpServlet{
-    protected List<String> listeController;
+    protected List<Mapping> urlMappings;
+
     @Override
     public void init() throws ServletException {
         try {
-            if (!this.getInitParameter("controllerPackage").isEmpty()) {
-                String ControllerPackage = this.getInitParameter("controllerPackage");
-                listeController = Utilitaires.getClassByPackageAndAnnotation(Controller.class, ControllerPackage,
-                        ElementType.TYPE);
+            String controllerPackage = this.getInitParameter("controllerPackage");
+
+            if (controllerPackage != null && !controllerPackage.isEmpty()) {
+                urlMappings = Utilitaires.getUrlMappings(Controller.class, controllerPackage);
             }
 
         } catch (Exception e) {
@@ -32,44 +32,106 @@ public class FrontServlet extends HttpServlet{
 
     public void doGet(HttpServletRequest request, HttpServletResponse response)
         throws ServletException, IOException {
-            response.setContentType("text/html");
-
-            String url = request.getRequestURI();
-
-            PrintWriter out = response.getWriter();
-            out.println("<h1>Url recuperer : " + url + "</h1>");
-            out.println("<h2>Controllers trouves :</h2>");
-            out.println("<ul>");
-            if (listeController != null && !listeController.isEmpty()) {
-                for (String ctrl : listeController) {
-                    out.println("<li>" + ctrl + "</li>");
-                }
-            } else {
-                out.println("<li>Aucun @Controller trouve</li>");
-            }
-            out.println("</ul>");
-        
+        processRequest(request, response);
     }
 
     public void doPost(HttpServletRequest request, HttpServletResponse response)
         throws ServletException, IOException {
-            response.setContentType("text/html");
+        processRequest(request, response);
+    }
 
-            String url = request.getRequestURI();
+    private void processRequest(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+        response.setContentType("text/html");
 
-            PrintWriter out = response.getWriter();
-            out.println("<h1>Url recuperer : " + url + "</h1>");
-            out.println("<h2>Controllers trouves :</h2>");
-            out.println("<ul>");
-            if (listeController != null && !listeController.isEmpty()) {
-                for (String ctrl : listeController) {
-                    out.println("<li>" + ctrl + "</li>");
-                }
-            } else {
-                out.println("<li>Aucun @Controller trouve</li>");
+        String url = getRequestPath(request);
+        Mapping mapping = findMapping(url);
+        Mapping sameBaseMapping = findMappingWithSameBase(url);
+
+        PrintWriter out = response.getWriter();
+        out.println("<html><body>");
+        out.println("<h2>Url recuperee : " + url + "</h2>");
+
+        if (urlMappings == null || urlMappings.isEmpty()) {
+            out.println("<p>Aucun lien supporte trouve.</p>");
+        } else if (mapping != null) {
+            out.println("<p>Lien defini.</p>");
+            printMapping(out, mapping);
+        } else if (sameBaseMapping != null) {
+            out.println("<p>Lien non defini : " + url + "</p>");
+            out.println("<p>Controller trouve pour ce prefixe : " + sameBaseMapping.getController() + "</p>");
+            out.println("<p>Methode associee : aucune</p>");
+        } else {
+            out.println("<p>Lien non defini : " + url + "</p>");
+            out.println("<h3>Liens supportes</h3>");
+            printAllMappings(out);
+        }
+
+        out.println("</body></html>");
+    }
+
+    private String getRequestPath(HttpServletRequest request) {
+        String url = request.getRequestURI();
+        String contextPath = request.getContextPath();
+
+        if (contextPath != null && !contextPath.isEmpty() && url.startsWith(contextPath)) {
+            url = url.substring(contextPath.length());
+        }
+
+        if (url == null || url.isEmpty()) {
+            return "/";
+        }
+
+        return url;
+    }
+
+    private Mapping findMapping(String url) {
+        if (urlMappings == null) {
+            return null;
+        }
+
+        for (Mapping mapping : urlMappings) {
+            if (mapping.getUrl().equals(url)) {
+                return mapping;
             }
-            out.println("</ul>");
-        
+        }
+
+        return null;
+    }
+
+    private Mapping findMappingWithSameBase(String url) {
+        if (urlMappings == null) {
+            return null;
+        }
+
+        String urlBase = getBasePath(url);
+        for (Mapping mapping : urlMappings) {
+            if (getBasePath(mapping.getUrl()).equals(urlBase)) {
+                return mapping;
+            }
+        }
+
+        return null;
+    }
+
+    private String getBasePath(String url) {
+        String[] parts = url.split("/");
+
+        if (parts.length > 1) {
+            return "/" + parts[1];
+        }
+
+        return url;
+    }
+
+    private void printAllMappings(PrintWriter out) {
+        for (Mapping mapping : urlMappings) {
+            printMapping(out, mapping);
+        }
+    }
+
+    private void printMapping(PrintWriter out, Mapping mapping) {
+        out.println("<p>" + mapping.getUrl() + " : dans Controller (" + mapping.getController()
+                + ") la methode associee est " + mapping.getMethod() + "()</p>");
     }
 }
-

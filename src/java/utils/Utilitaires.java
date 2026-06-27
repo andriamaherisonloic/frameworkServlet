@@ -4,9 +4,12 @@ import java.io.File;
 import java.lang.annotation.Annotation;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Target;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 import java.net.URL;
+
+import annotation.UrlMapping;
 
 public class Utilitaires {
 
@@ -33,6 +36,37 @@ public class Utilitaires {
         }
 
         return null;
+    }
+
+    public static List<Class<?>> getClassesByPackageAndAnnotation(Class<? extends Annotation> annotation,
+            String packageName, ElementType type)
+            throws Exception {
+        if (typeElementValide(annotation, type)) {
+            List<Class<?>> classInPackage = getClassByPackage(packageName);
+            return filterByAnnotation(classInPackage, annotation);
+        }
+
+        return new ArrayList<>();
+    }
+
+    public static List<Mapping> getUrlMappings(Class<? extends Annotation> controllerAnnotation,
+            String packageName) throws Exception {
+        List<Mapping> mappings = new ArrayList<>();
+        List<Class<?>> controllers = getClassesByPackageAndAnnotation(controllerAnnotation, packageName,
+                ElementType.TYPE);
+
+        for (Class<?> controller : controllers) {
+            Method[] methods = controller.getDeclaredMethods();
+
+            for (Method method : methods) {
+                if (method.isAnnotationPresent(UrlMapping.class)) {
+                    UrlMapping urlMapping = method.getAnnotation(UrlMapping.class);
+                    mappings.add(new Mapping(urlMapping.value(), controller.getSimpleName(), method.getName()));
+                }
+            }
+        }
+
+        return mappings;
     }
 
     public static List<Class<?>> getClassByPackage(String packageName) throws Exception {
