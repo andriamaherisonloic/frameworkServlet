@@ -6,9 +6,11 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Target;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.net.URL;
 
+import annotation.Controller;
 import annotation.UrlMapping;
 
 public class Utilitaires {
@@ -65,6 +67,29 @@ public class Utilitaires {
         }
 
         return mappings;
+    }
+
+    public static void getUrlAndMethod(String packageName, HashMap<UtilMethode, Mapping> urlMapping) throws Exception {
+        List<Class<?>> controllers = getClassesByPackageAndAnnotation(Controller.class, packageName, ElementType.TYPE);
+
+        for (Class<?> controller : controllers) {
+            Method[] methods = controller.getDeclaredMethods();
+
+            for (Method method : methods) {
+                if (method.isAnnotationPresent(UrlMapping.class)) {
+                    UrlMapping urlMappingAnnotation = method.getAnnotation(UrlMapping.class);
+                    String url = urlMappingAnnotation.value();
+                    String httpMethod = urlMappingAnnotation.method();
+                    if (httpMethod == null || httpMethod.isBlank()) {
+                        httpMethod = "GET";
+                    }
+
+                    UtilMethode key = new UtilMethode(url, httpMethod);
+                    Mapping mapping = new Mapping(url, controller.getSimpleName(), method.getName());
+                    urlMapping.put(key, mapping);
+                }
+            }
+        }
     }
 
     public static List<Class<?>> getClassByPackage(String packageName) throws Exception {
