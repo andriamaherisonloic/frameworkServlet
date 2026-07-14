@@ -28,9 +28,6 @@ public class Utilitaires {
 
                 return listeClass;
             }
-
-
-            
         } catch (Exception e) {
             throw e;
         }
@@ -61,7 +58,8 @@ public class Utilitaires {
             for (Method method : methods) {
                 if (method.isAnnotationPresent(UrlMapping.class)) {
                     UrlMapping urlMapping = method.getAnnotation(UrlMapping.class);
-                    mappings.add(new Mapping(urlMapping.value(), controller.getSimpleName(), method.getName()));
+                    String url = urlMapping.value();
+                    mappings.add(new Mapping(url, controller.getSimpleName(), method.getName()));
                 }
             }
         }
