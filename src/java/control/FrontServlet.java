@@ -32,6 +32,7 @@ public class FrontServlet extends HttpServlet {
     private Map<UrlMethod, Method> urlMappings = new HashMap<>();
     private Map<String, Object> controllerInstances = new HashMap<>();
     protected List<Mapping> mappings;
+    private Model lastInjectedModel;
 
     @Override
     public void init() throws ServletException {
@@ -217,7 +218,8 @@ public class FrontServlet extends HttpServlet {
             }
 
             if (result instanceof String) {
-                renderView(req, res, (String) result, Map.of());
+                Map<String, Object> modelData = (lastInjectedModel != null) ? lastInjectedModel.asMap() : Map.of();
+                renderView(req, res, (String) result, modelData);
                 return;
             }
 
@@ -313,6 +315,7 @@ public class FrontServlet extends HttpServlet {
     }
 
     private Object[] buildArguments(Method method, HttpServletRequest req, HttpServletResponse res) {
+        lastInjectedModel = null;
         Class<?>[] parameterTypes = method.getParameterTypes();
         Object[] arguments = new Object[parameterTypes.length];
         for (int i = 0; i < parameterTypes.length; i++) {
@@ -322,9 +325,11 @@ public class FrontServlet extends HttpServlet {
             } else if (HttpServletResponse.class.isAssignableFrom(parameterType)) {
                 arguments[i] = res;
             } else if (Model.class.isAssignableFrom(parameterType)) {
-                arguments[i] = new Model();
+                lastInjectedModel = new Model();
+                arguments[i] = lastInjectedModel;
             } else if (Map.class.isAssignableFrom(parameterType)) {
-                arguments[i] = new Model();
+                lastInjectedModel = new Model();
+                arguments[i] = lastInjectedModel;
             } else {
                 arguments[i] = null;
             }
@@ -349,10 +354,17 @@ public class FrontServlet extends HttpServlet {
             req.setAttribute(entry.getKey(), entry.getValue());
         }
 
-        String prefix = getServletContext().getInitParameter("viewPrefix");
-        String suffix = getServletContext().getInitParameter("viewSuffix");
+        String prefix = getServletContext().getInitParameter("prefix");
+        if (prefix == null) {
+            prefix = getServletContext().getInitParameter("viewPrefix");
+        }
         if (prefix == null) {
             prefix = "/WEB-INF/views/";
+        }
+
+        String suffix = getServletContext().getInitParameter("suffix");
+        if (suffix == null) {
+            suffix = getServletContext().getInitParameter("viewSuffix");
         }
         if (suffix == null) {
             suffix = ".jsp";
