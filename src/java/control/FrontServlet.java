@@ -24,6 +24,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import utils.Mapping;
 import utils.Model;
 import utils.ModelAndView;
+import utils.Repository;
 import utils.UrlMethod;
 import utils.Utilitaires;
 
@@ -314,10 +315,17 @@ public class FrontServlet extends HttpServlet {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private Object[] buildArguments(Method method, HttpServletRequest req, HttpServletResponse res) {
         lastInjectedModel = null;
         Class<?>[] parameterTypes = method.getParameterTypes();
         Object[] arguments = new Object[parameterTypes.length];
+
+        Map<String, Object> repositories = (Map<String, Object>) getServletContext().getAttribute("repositories");
+        if (repositories == null) {
+            repositories = new HashMap<>();
+        }
+
         for (int i = 0; i < parameterTypes.length; i++) {
             Class<?> parameterType = parameterTypes[i];
             if (HttpServletRequest.class.isAssignableFrom(parameterType)) {
@@ -330,11 +338,22 @@ public class FrontServlet extends HttpServlet {
             } else if (Map.class.isAssignableFrom(parameterType)) {
                 lastInjectedModel = new Model();
                 arguments[i] = lastInjectedModel;
+            } else if (Repository.class.isAssignableFrom(parameterType)) {
+                arguments[i] = findRepositoryInstance(parameterType, repositories);
             } else {
                 arguments[i] = null;
             }
         }
         return arguments;
+    }
+
+    private Object findRepositoryInstance(Class<?> parameterType, Map<String, Object> repositories) {
+        for (Object repo : repositories.values()) {
+            if (parameterType.isInstance(repo)) {
+                return repo;
+            }
+        }
+        return null;
     }
 
     private void renderModelAndView(HttpServletRequest req, HttpServletResponse res, ModelAndView modelAndView)
