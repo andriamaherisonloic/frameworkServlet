@@ -14,7 +14,7 @@ mkdir -p "$BUILD_DIR/classes"
 
 echo "Compilation..."
 
-find "$SRC_DIR" -name "*.java" > sources.txt
+find "$SRC_DIR" -name "*.java" -printf '"%p"\n' > sources.txt
 
 javac \
     -cp "$SERVLET_API_JAR" \

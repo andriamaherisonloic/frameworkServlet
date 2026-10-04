@@ -40,8 +40,13 @@ public class FrontServletListener implements ServletContextListener {
             String dbUser = context.getInitParameter("dbUser");
             String dbPassword = context.getInitParameter("dbPassword");
 
+            String repositoryPackageName = context.getInitParameter("repositoryPackage");
+            if (repositoryPackageName == null || repositoryPackageName.isBlank()) {
+                repositoryPackageName = "repository";
+            }
+
             Map<String, Object> repositoryInstances = scanAndInitRepositories(
-                    packageName, dbDriver, dbUrl, dbUser, dbPassword);
+                    repositoryPackageName, dbDriver, dbUrl, dbUser, dbPassword);
             context.setAttribute("repositories", repositoryInstances);
 
             System.out.println("Framework initialise - " + controllers.size()

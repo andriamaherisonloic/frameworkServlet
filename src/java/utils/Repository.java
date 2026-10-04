@@ -30,6 +30,9 @@ public abstract class Repository {
         if (dbDriver != null && !dbDriver.isEmpty()) {
             Class.forName(dbDriver);
         }
+        if (dbPassword == null || dbPassword.isEmpty()) {
+            return DriverManager.getConnection(dbUrl, dbUser, "");
+        }
         return DriverManager.getConnection(dbUrl, dbUser, dbPassword);
     }
 
