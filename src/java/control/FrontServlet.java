@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import annotation.Controller;
+import annotation.WebApi;
 import annotation.UrlMapping;
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.ServletException;
@@ -26,6 +27,7 @@ import utils.Model;
 import utils.ModelAndView;
 import utils.Repository;
 import utils.UrlMethod;
+import utils.JsonSerializer;
 import utils.Utilitaires;
 
 @WebServlet("/")
@@ -213,6 +215,11 @@ public class FrontServlet extends HttpServlet {
             }
 
             Object result = method.invoke(controller, buildArguments(method, req, res));
+            if (method.isAnnotationPresent(WebApi.class)) {
+                renderJson(res, result);
+                return;
+            }
+
             if (result instanceof ModelAndView) {
                 renderModelAndView(req, res, (ModelAndView) result);
                 return;
@@ -228,6 +235,11 @@ public class FrontServlet extends HttpServlet {
         } catch (Exception e) {
             throw new ServletException("Erreur invocation de " + method.getName(), e);
         }
+    }
+
+    private void renderJson(HttpServletResponse res, Object result) throws IOException {
+        res.setContentType("application/json; charset=UTF-8");
+        res.getWriter().write(JsonSerializer.serialize(result));
     }
 
     protected Method getMethodForUrl(String path, String httpMethod) {
