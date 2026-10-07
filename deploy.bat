@@ -16,6 +16,7 @@ set "SRCS="
 for /r "%SRC_DIR%" %%f in (*.java) do set "SRCS=!SRCS! "%%f""
 
 javac ^
+    -parameters ^
     -encoding UTF-8 ^
     -cp "%SERVLET_API_JAR%" ^
     -d "%BUILD_DIR%\classes" ^
