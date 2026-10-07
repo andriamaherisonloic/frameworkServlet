@@ -17,6 +17,7 @@ echo "Compilation..."
 find "$SRC_DIR" -name "*.java" -printf '"%p"\n' > sources.txt
 
 javac \
+    -parameters \
     -cp "$SERVLET_API_JAR" \
     -d "$BUILD_DIR/classes" \
     @sources.txt

@@ -25,6 +25,10 @@ public final class JsonSerializer {
         if (value instanceof Number || value instanceof Boolean) {
             return String.valueOf(value);
         }
+        if (value instanceof java.time.temporal.TemporalAccessor || value instanceof java.util.Date) {
+            // LocalDate, LocalDateTime, java.util.Date, java.sql.Date, ... -> format ISO
+            return quote(String.valueOf(value));
+        }
         if (visited.put(value, Boolean.TRUE) != null) {
             throw new IllegalArgumentException("Cycle détecté pendant la sérialisation JSON");
         }

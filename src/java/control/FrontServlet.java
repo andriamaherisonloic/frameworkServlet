@@ -6,6 +6,7 @@ import java.io.PrintWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.Parameter;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,7 +28,9 @@ import utils.Model;
 import utils.ModelAndView;
 import utils.Repository;
 import utils.UrlMethod;
+import utils.BindingException;
 import utils.JsonSerializer;
+import utils.ParamBinder;
 import utils.Utilitaires;
 
 @WebServlet("/")
@@ -232,6 +235,8 @@ public class FrontServlet extends HttpServlet {
             }
 
             res.sendError(HttpServletResponse.SC_NO_CONTENT);
+        } catch (BindingException e) {
+            res.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
         } catch (Exception e) {
             throw new ServletException("Erreur invocation de " + method.getName(), e);
         }
@@ -328,18 +333,21 @@ public class FrontServlet extends HttpServlet {
     }
 
     @SuppressWarnings("unchecked")
-    private Object[] buildArguments(Method method, HttpServletRequest req, HttpServletResponse res) {
+    private Object[] buildArguments(Method method, HttpServletRequest req, HttpServletResponse res)
+            throws BindingException {
         lastInjectedModel = null;
-        Class<?>[] parameterTypes = method.getParameterTypes();
-        Object[] arguments = new Object[parameterTypes.length];
+        Parameter[] parameters = method.getParameters();
+        Object[] arguments = new Object[parameters.length];
 
         Map<String, Object> repositories = (Map<String, Object>) getServletContext().getAttribute("repositories");
         if (repositories == null) {
             repositories = new HashMap<>();
         }
 
-        for (int i = 0; i < parameterTypes.length; i++) {
-            Class<?> parameterType = parameterTypes[i];
+        // Sprint 7 : tous les arguments sont initialises a null par defaut,
+        // puis remplaces par les valeurs recues dans la requete lorsqu'elles existent.
+        for (int i = 0; i < parameters.length; i++) {
+            Class<?> parameterType = parameters[i].getType();
             if (HttpServletRequest.class.isAssignableFrom(parameterType)) {
                 arguments[i] = req;
             } else if (HttpServletResponse.class.isAssignableFrom(parameterType)) {
@@ -352,8 +360,16 @@ public class FrontServlet extends HttpServlet {
                 arguments[i] = lastInjectedModel;
             } else if (Repository.class.isAssignableFrom(parameterType)) {
                 arguments[i] = findRepositoryInstance(parameterType, repositories);
+            } else if (ParamBinder.isSimpleType(parameterType)) {
+                // Sprint 7 : binding des parametres simples (String, int, double, ...)
+                arguments[i] = ParamBinder.bindParameter(method, parameters[i], parameterType, req);
             } else {
-                arguments[i] = null;
+                // Sprint 7 : le binding automatique des objets n'est pas encore supporte
+                throw new BindingException(
+                        "Binding impossible : le parametre \"" + parameters[i].getName() + "\" de la methode "
+                        + method.getDeclaringClass().getSimpleName() + "." + method.getName() + "()"
+                        + " est un objet de type " + parameterType.getName()
+                        + ". Le binding des objets n'est pas encore pris en charge (Sprint 7).");
             }
         }
         return arguments;
