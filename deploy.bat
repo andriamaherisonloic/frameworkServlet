@@ -1,40 +1,72 @@
 @echo off
-setlocal EnableDelayedExpansion
+setlocal
+pushd "%~dp0"
 
-set "APP_NAME=framework"
-set "SRC_DIR=src\java"
-set "BUILD_DIR=build"
-set "LIB_DIR=lib"
-set "SERVLET_API_JAR=%LIB_DIR%\servlet-api.jar"
+set APP_NAME=framework
+set SRC_DIR=src\java
+set WEB_DIR=src\main\webapp
+set BUILD_DIR=build
+set LIB_DIR=C:\apache-tomcat-10.1.55-windows-x64\apache-tomcat-10.1.55\lib
+set TOMCAT_WEBAPPS=C:\apache-tomcat-10.1.55-windows-x64\apache-tomcat-10.1.55\webapps
+set SERVLET_API_JAR=%LIB_DIR%\servlet-api.jar
 
-echo Nettoyage...
-if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
-mkdir "%BUILD_DIR%\classes"
+echo =========================
+echo CLEAN BUILD
+echo =========================
 
-echo Compilation...
-set "SRCS="
-for /r "%SRC_DIR%" %%f in (*.java) do set "SRCS=!SRCS! "%%f""
+if exist %BUILD_DIR% rmdir /s /q %BUILD_DIR%
+mkdir %BUILD_DIR%\WEB-INF\classes
 
-javac ^
-    -parameters ^
-    -encoding UTF-8 ^
-    -cp "%SERVLET_API_JAR%" ^
-    -d "%BUILD_DIR%\classes" ^
-    %SRCS%
+echo =========================
+echo COMPILATION JAVA
+echo =========================
+
+dir /s /b %SRC_DIR%\*.java > sources.txt
+
+javac -cp "%SERVLET_API_JAR%" ^
+-d %BUILD_DIR%\WEB-INF\classes ^
+@sources.txt
 
 if errorlevel 1 (
-    echo Erreur de compilation
+    echo ERREUR COMPILATION
+    del sources.txt
+    popd
+    pause
     exit /b 1
 )
 
-echo Creation du JAR...
-mkdir "%BUILD_DIR%\jar"
+del sources.txt
 
-jar cf "%BUILD_DIR%\jar\%APP_NAME%.jar" ^
-    -C "%BUILD_DIR%\classes" .
+echo =========================
+echo COPIE WEBAPP
+echo =========================
 
-echo.
-echo JAR cree : %BUILD_DIR%\jar\%APP_NAME%.jar
-echo.
+if not exist %WEB_DIR%\WEB-INF\web.xml (
+    echo ERREUR: web.xml introuvable dans %WEB_DIR%\WEB-INF\web.xml
+    popd
+    pause
+    exit /b 1
+)
 
-endlocal
+xcopy %WEB_DIR% %BUILD_DIR% /E /I /Y
+
+echo =========================
+echo CREATION WAR
+echo =========================
+
+cd %BUILD_DIR%
+jar -cvf %APP_NAME%.war *
+cd ..
+
+echo =========================
+echo DEPLOIEMENT TOMCAT
+echo =========================
+
+copy /Y %BUILD_DIR%\%APP_NAME%.war %TOMCAT_WEBAPPS%
+
+echo =========================
+echo DONE
+echo =========================
+
+popd
+pause

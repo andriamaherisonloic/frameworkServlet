@@ -1,0 +1,74 @@
+@echo off
+setlocal
+pushd "%~dp0"
+
+set SERVLET_API=C:\apache-tomcat-10.1.55-windows-x64\apache-tomcat-10.1.55\lib\servlet-api.jar
+
+echo =========================
+echo CLEAN BUILD
+echo =========================
+
+if exist build rmdir /s /q build
+mkdir build\classes
+mkdir lib
+
+echo =========================
+echo 1. COMPILATION FRAMEWORK
+echo =========================
+
+dir /s /b src\java\annotation\*.java src\java\context\*.java src\java\control\*.java src\java\listener\*.java src\java\mapping\*.java src\java\model\*.java src\java\util\*.java > sources_fw.txt
+
+javac -cp "%SERVLET_API%" -d build\classes @sources_fw.txt
+
+if errorlevel 1 (
+    echo ERREUR FRAMEWORK
+    popd
+    pause
+    exit /b 1
+)
+
+del sources_fw.txt
+
+echo =========================
+echo 2. CREATION JAR FRAMEWORK
+echo =========================
+
+jar cvf lib\sprint1.jar -C build\classes .
+
+
+if errorlevel 1 (
+    echo ERREUR JAR
+    popd
+    pause
+    exit /b 1
+)
+
+echo =========================
+echo 3. COMPILATION APPLICATION
+echo =========================
+
+cd ..\testmonjar
+
+mkdir build\classes
+
+dir /s /b src\main\java\*.java > sources_app.txt
+
+javac -cp "..\framework\lib\sprint1.jar;%SERVLET_API%" ^
+-d build\classes ^
+@sources_app.txt
+
+if errorlevel 1 (
+    echo ERREUR APPLICATION
+    popd
+    pause
+    exit /b 1
+)
+
+del sources_app.txt
+
+echo =========================
+echo BUILD TERMINE
+echo =========================
+
+popd
+pause
