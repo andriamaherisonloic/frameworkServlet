@@ -1,57 +1,52 @@
 package control;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Parameter;
-import java.net.URL;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
-
-import annotation.Controller;
-import annotation.WebApi;
-import annotation.UrlMapping;
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.ServletException;
-import jakarta.servlet.annotation.WebServlet;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import utils.Mapping;
-import utils.Model;
-import utils.ModelAndView;
-import utils.Repository;
-import utils.UrlMethod;
-import utils.BindingException;
-import utils.JsonSerializer;
-import utils.ParamBinder;
-import utils.Utilitaires;
 
-@WebServlet("/")
+import annotation.MyRequestParam;
+import annotation.RepositoryAnnotation;
+import annotation.UrlMapping;
+import annotation.WebApi;
+import context.ApplicationContext;
+import mapping.UrlMethod;
+import model.Model;
+import model.ModelAndView;
+import util.JsonSerializer;
+
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Parameter;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
 public class FrontServlet extends HttpServlet {
+
+    private static final int MAX_BINDING_DEPTH = 32;
+    private static final int MAX_BINDING_PREFIXES = 4;
+
     private Map<UrlMethod, Method> urlMappings = new HashMap<>();
-    private Map<String, Object> controllerInstances = new HashMap<>();
-    protected List<Mapping> mappings;
-    private Model lastInjectedModel;
+    private ApplicationContext applicationContext;
 
     @Override
     public void init() throws ServletException {
         super.init();
-        try {
-            String controllerPackage = this.getInitParameter("controllerPackage");
-            if (controllerPackage != null && !controllerPackage.isEmpty()) {
-                mappings = Utilitaires.getUrlMappings(Controller.class, controllerPackage);
-            }
-            rebuildRegistry();
-        } catch (Exception e) {
-            throw new ServletException(e);
-        }
+        applicationContext = (ApplicationContext) getServletContext().getAttribute("applicationContext");
+        rebuildRegistry();
     }
 
     @Override
@@ -68,12 +63,12 @@ public class FrontServlet extends HttpServlet {
 
     private void rebuildRegistry() throws ServletException {
         try {
-            List<Class<?>> controllers = resolveControllers();
             urlMappings = new HashMap<>();
-            controllerInstances = new HashMap<>();
 
-            for (Class<?> controllerClass : controllers) {
-                controllerInstances.put(controllerClass.getName(), instantiateController(controllerClass));
+            for (Class<?> controllerClass : applicationContext.getBeanClasses()) {
+                if (controllerClass.isAnnotationPresent(RepositoryAnnotation.class)) {
+                    continue;
+                }
 
                 Map<UrlMethod, Method> classMappings = getUrlMappings(controllerClass);
                 for (Map.Entry<UrlMethod, Method> entry : classMappings.entrySet()) {
@@ -91,7 +86,6 @@ public class FrontServlet extends HttpServlet {
                 }
             }
 
-            getServletContext().setAttribute("controllers", controllers);
             getServletContext().setAttribute("urlMappings", urlMappings);
         } catch (ServletException e) {
             getServletContext().setAttribute("initError", e.getMessage());
@@ -101,57 +95,8 @@ public class FrontServlet extends HttpServlet {
         }
     }
 
-    private List<Class<?>> resolveControllers() throws Exception {
-        Object storedControllers = getServletContext().getAttribute("controllers");
-        if (storedControllers instanceof List<?>) {
-            List<Class<?>> controllers = new ArrayList<>();
-            for (Object item : (List<?>) storedControllers) {
-                if (item instanceof Class<?>) {
-                    controllers.add((Class<?>) item);
-                }
-            }
-            if (!controllers.isEmpty()) {
-                return controllers;
-            }
-        }
-
-        String packageName = getServletContext().getInitParameter("controllerPackage");
-        if (packageName == null || packageName.isBlank()) {
-            packageName = "control";
-        }
-        return scanControllers(packageName);
-    }
-
-    private List<Class<?>> scanControllers(String packageName) throws Exception {
-        List<Class<?>> controllers = new ArrayList<>();
-        String path = packageName.replace('.', '/');
-        ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
-        URL resource = classLoader.getResource(path);
-        if (resource == null) {
-            return controllers;
-        }
-
-        File directory = new File(resource.toURI());
-        File[] files = directory.listFiles();
-        if (files == null) {
-            return controllers;
-        }
-
-        for (File file : files) {
-            if (file.getName().endsWith(".class")) {
-                String className = packageName + "." + file.getName().replace(".class", "");
-                Class<?> clazz = Class.forName(className);
-                if (clazz.isAnnotationPresent(Controller.class)) {
-                    controllers.add(clazz);
-                }
-            }
-        }
-
-        return controllers;
-    }
-
     private Map<UrlMethod, Method> getUrlMappings(Class<?> controllerClass) {
-        Map<UrlMethod, Method> controllerUrlMappings = new HashMap<>();
+        Map<UrlMethod, Method> mappings = new HashMap<>();
         for (Method method : controllerClass.getDeclaredMethods()) {
             UrlMapping mapping = method.getAnnotation(UrlMapping.class);
             if (mapping == null) {
@@ -164,8 +109,8 @@ public class FrontServlet extends HttpServlet {
             }
 
             UrlMethod key = new UrlMethod(normalizePath(url), resolveHttpMethod(mapping));
-            if (controllerUrlMappings.containsKey(key)) {
-                Method existing = controllerUrlMappings.get(key);
+            if (mappings.containsKey(key)) {
+                Method existing = mappings.get(key);
                 throw new RuntimeException(
                         "UrlMapping dupliqué : " + key
                         + " (déjà déclaré dans " + existing.getDeclaringClass().getName()
@@ -173,12 +118,15 @@ public class FrontServlet extends HttpServlet {
                         + ") en conflit avec "
                         + controllerClass.getName() + "." + method.getName());
             }
-            controllerUrlMappings.put(key, method);
+            mappings.put(key, method);
         }
-        return controllerUrlMappings;
+        return mappings;
     }
 
     private String resolveUrl(UrlMapping mapping) {
+        if (mapping.path() != null && !mapping.path().isBlank()) {
+            return mapping.path();
+        }
         return mapping.value();
     }
 
@@ -197,28 +145,28 @@ public class FrontServlet extends HttpServlet {
             return;
         }
 
-        String requestPath = normalizePath(getRequestPath(req));
+        String requestPath = normalizePath(req.getPathInfo());
         if ("/".equals(requestPath)) {
-            renderControllerIndex(req, res);
+            renderControllerIndex(res);
             return;
         }
 
         String httpMethod = req.getMethod();
         Method method = getMethodForUrl(requestPath, httpMethod);
         if (method == null) {
-            res.sendError(HttpServletResponse.SC_NOT_FOUND, "Aucune route trouve pour " + requestPath);
+            res.sendError(HttpServletResponse.SC_NOT_FOUND, "Aucune route trouvée pour " + requestPath);
             return;
         }
 
         try {
-            Object controller = getControllerInstance(method.getDeclaringClass().getName(), httpMethod, requestPath);
+            Object controller = getControllerInstance(method.getDeclaringClass().getName());
             if (controller == null) {
-                res.sendError(HttpServletResponse.SC_NOT_FOUND, "Controleur introuvable pour " + requestPath);
+                res.sendError(HttpServletResponse.SC_NOT_FOUND, "Contrôleur introuvable pour " + requestPath);
                 return;
             }
 
             Object result = method.invoke(controller, buildArguments(method, req, res));
-            if (method.isAnnotationPresent(WebApi.class)) {
+            if (isWebApi(method)) {
                 renderJson(res, result);
                 return;
             }
@@ -229,22 +177,27 @@ public class FrontServlet extends HttpServlet {
             }
 
             if (result instanceof String) {
-                Map<String, Object> modelData = (lastInjectedModel != null) ? lastInjectedModel.asMap() : Map.of();
-                renderView(req, res, (String) result, modelData);
+                renderView(req, res, (String) result, Map.of());
                 return;
             }
 
             res.sendError(HttpServletResponse.SC_NO_CONTENT);
-        } catch (BindingException e) {
-            res.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
         } catch (Exception e) {
             throw new ServletException("Erreur invocation de " + method.getName(), e);
         }
     }
 
+    private boolean isWebApi(Method method) {
+        return method.isAnnotationPresent(WebApi.class)
+                || method.getDeclaringClass().isAnnotationPresent(WebApi.class);
+    }
+
     private void renderJson(HttpServletResponse res, Object result) throws IOException {
+        Object value = result instanceof ModelAndView modelAndView ? modelAndView.getModel() : result;
+
         res.setContentType("application/json; charset=UTF-8");
-        res.getWriter().write(JsonSerializer.serialize(result));
+        res.setCharacterEncoding("UTF-8");
+        res.getWriter().write(JsonSerializer.toJson(value));
     }
 
     protected Method getMethodForUrl(String path, String httpMethod) {
@@ -258,36 +211,18 @@ public class FrontServlet extends HttpServlet {
         return urlMappings;
     }
 
-    protected Object getControllerInstance(String className, String httpMethod, String path) {
-        if (controllerInstances == null) {
+    protected Object getControllerInstance(String className) {
+        if (applicationContext == null) {
             return null;
         }
-        Method method = getMethodForUrl(path, httpMethod);
-        if (method == null) {
-            return null;
-        }
-        return controllerInstances.get(className);
+        return applicationContext.getBean(className);
     }
 
-    private String getRequestPath(HttpServletRequest request) {
-        String url = request.getRequestURI();
-        String contextPath = request.getContextPath();
-        if (contextPath != null && !contextPath.isEmpty() && url.startsWith(contextPath)) {
-            url = url.substring(contextPath.length());
-        }
-        if (url == null || url.isEmpty()) {
-            return "/";
-        }
-        return url;
-    }
-
-    private void renderControllerIndex(HttpServletRequest req, HttpServletResponse res) throws IOException {
+    private void renderControllerIndex(HttpServletResponse res) throws IOException {
         List<String> controllers = new ArrayList<>();
-        if (getServletContext().getAttribute("controllers") instanceof List<?>) {
-            for (Object item : (List<?>) getServletContext().getAttribute("controllers")) {
-                if (item instanceof Class<?>) {
-                    controllers.add(((Class<?>) item).getSimpleName());
-                }
+        for (Class<?> clazz : applicationContext.getBeanClasses()) {
+            if (!clazz.isAnnotationPresent(RepositoryAnnotation.class)) {
+                controllers.add(clazz.getSimpleName());
             }
         }
 
@@ -298,90 +233,246 @@ public class FrontServlet extends HttpServlet {
         res.setContentType("text/html; charset=UTF-8");
         PrintWriter writer = res.getWriter();
         writer.println("<!DOCTYPE html>");
-        writer.println("<html><head><meta charset=\"UTF-8\"><title>Liste des controllers</title></head><body>");
-        writer.println("<h1>Liste des contrôleurs annotés</h1>");
+        writer.println("<html><head><meta charset=\"UTF-8\"><title>Contrôleurs annotés</title></head><body>");
+        writer.println("<h1>Liste des contrôleurs @MyController</h1>");
         writer.println("<ul>");
         for (String controller : controllers) {
             writer.println("<li>" + controller + "</li>");
         }
         writer.println("</ul>");
-
-        if (urlMappings != null && !urlMappings.isEmpty()) {
-            writer.println("<h2>URLs supportées</h2>");
-            writer.println("<ul>");
-            for (Map.Entry<UrlMethod, Method> entry : urlMappings.entrySet()) {
-                UrlMethod key = entry.getKey();
-                Method m = entry.getValue();
-                writer.println("<li>" + key + " → " + m.getDeclaringClass().getSimpleName() + "." + m.getName() + "()</li>");
-            }
-            writer.println("</ul>");
-        }
-
         writer.println("</body></html>");
     }
 
-    private Object instantiateController(Class<?> controllerClass) {
-        try {
-            Constructor<?> constructor = controllerClass.getDeclaredConstructor();
-            if (!Modifier.isPublic(constructor.getModifiers())) {
-                constructor.setAccessible(true);
-            }
-            return constructor.newInstance();
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    @SuppressWarnings("unchecked")
     private Object[] buildArguments(Method method, HttpServletRequest req, HttpServletResponse res)
-            throws BindingException {
-        lastInjectedModel = null;
+            throws ServletException {
         Parameter[] parameters = method.getParameters();
         Object[] arguments = new Object[parameters.length];
-
-        Map<String, Object> repositories = (Map<String, Object>) getServletContext().getAttribute("repositories");
-        if (repositories == null) {
-            repositories = new HashMap<>();
-        }
-
-        // Sprint 7 : tous les arguments sont initialises a null par defaut,
-        // puis remplaces par les valeurs recues dans la requete lorsqu'elles existent.
         for (int i = 0; i < parameters.length; i++) {
-            Class<?> parameterType = parameters[i].getType();
-            if (HttpServletRequest.class.isAssignableFrom(parameterType)) {
-                arguments[i] = req;
-            } else if (HttpServletResponse.class.isAssignableFrom(parameterType)) {
-                arguments[i] = res;
-            } else if (Model.class.isAssignableFrom(parameterType)) {
-                lastInjectedModel = new Model();
-                arguments[i] = lastInjectedModel;
-            } else if (Map.class.isAssignableFrom(parameterType)) {
-                lastInjectedModel = new Model();
-                arguments[i] = lastInjectedModel;
-            } else if (Repository.class.isAssignableFrom(parameterType)) {
-                arguments[i] = findRepositoryInstance(parameterType, repositories);
-            } else if (ParamBinder.isSimpleType(parameterType)) {
-                // Sprint 7 : binding des parametres simples (String, int, double, ...)
-                arguments[i] = ParamBinder.bindParameter(method, parameters[i], parameterType, req);
-            } else {
-                // Sprint 7 : le binding automatique des objets n'est pas encore supporte
-                throw new BindingException(
-                        "Binding impossible : le parametre \"" + parameters[i].getName() + "\" de la methode "
-                        + method.getDeclaringClass().getSimpleName() + "." + method.getName() + "()"
-                        + " est un objet de type " + parameterType.getName()
-                        + ". Le binding des objets n'est pas encore pris en charge (Sprint 7).");
-            }
+            arguments[i] = resolveArgument(parameters[i], req, res);
         }
         return arguments;
     }
 
-    private Object findRepositoryInstance(Class<?> parameterType, Map<String, Object> repositories) {
-        for (Object repo : repositories.values()) {
-            if (parameterType.isInstance(repo)) {
-                return repo;
-            }
+    private Object resolveArgument(Parameter parameter, HttpServletRequest req, HttpServletResponse res)
+            throws ServletException {
+        MyRequestParam requestParam = parameter.getAnnotation(MyRequestParam.class);
+        if (requestParam != null) {
+            return resolveRequestParam(parameter, requestParam.value(), req);
+        }
+
+        Class<?> parameterType = parameter.getType();
+        if (HttpServletRequest.class.isAssignableFrom(parameterType)) {
+            return req;
+        }
+        if (HttpServletResponse.class.isAssignableFrom(parameterType)) {
+            return res;
+        }
+        if (Model.class.isAssignableFrom(parameterType)) {
+            return new Model();
+        }
+        if (Map.class.isAssignableFrom(parameterType)) {
+            return new LinkedHashMap<String, Object>();
         }
         return null;
+    }
+
+    private Object resolveRequestParam(Parameter parameter, String name, HttpServletRequest req)
+            throws ServletException {
+        Class<?> targetType = parameter.getType();
+
+        if (isSimpleType(targetType)) {
+            String value = req.getParameter(name);
+            if (value == null) {
+                throw new ServletException("Paramètre manquant : " + name + describe(parameter));
+            }
+            return convertParamValue(value, targetType, name);
+        }
+
+        return bindObject(targetType, new LinkedHashSet<>(List.of(name)), req, parameter, 0);
+    }
+
+    private boolean isSimpleType(Class<?> type) {
+        return type == String.class
+                || type == CharSequence.class
+                || type == Object.class
+                || type.isPrimitive()
+                || type.isEnum()
+                || type == Boolean.class
+                || type == Character.class
+                || Number.class.isAssignableFrom(type);
+    }
+
+    private Object bindObject(Class<?> targetType, Set<String> prefixes, HttpServletRequest req, Parameter parameter,
+            int depth) throws ServletException {
+        if (depth > MAX_BINDING_DEPTH) {
+            throw new ServletException("Paramètre " + prefixes.iterator().next()
+                    + " : imbrication d'objets trop profonde (max " + MAX_BINDING_DEPTH + ")" + describe(parameter));
+        }
+
+        Object instance = instantiate(targetType, prefixes.iterator().next(), parameter);
+
+        for (Field field : targetType.getDeclaredFields()) {
+            int modifiers = field.getModifiers();
+            if (Modifier.isStatic(modifiers) || Modifier.isFinal(modifiers) || field.isSynthetic()) {
+                continue;
+            }
+
+            String fieldName = field.getName();
+            Set<String> candidates = new LinkedHashSet<>();
+            for (String prefix : prefixes) {
+                candidates.add(prefix + "." + fieldName);
+            }
+            candidates.add(fieldName);
+
+            String value = null;
+            String label = candidates.iterator().next();
+            for (String candidate : candidates) {
+                value = req.getParameter(candidate);
+                if (value != null) {
+                    label = candidate;
+                    break;
+                }
+            }
+
+            if (value != null) {
+                setField(field, instance, convertFieldValue(value, field.getType(), label), label);
+            } else if (!isSimpleType(field.getType()) && hasDefaultConstructor(field.getType())) {
+                setField(field, instance, bindObject(field.getType(), trim(candidates), req, parameter, depth + 1),
+                        label);
+            }
+        }
+        return instance;
+    }
+
+    private Set<String> trim(Set<String> candidates) {
+        Set<String> kept = new LinkedHashSet<>();
+        for (String candidate : candidates) {
+            if (kept.size() >= MAX_BINDING_PREFIXES) {
+                break;
+            }
+            kept.add(candidate);
+        }
+        return kept;
+    }
+
+    private void setField(Field field, Object instance, Object value, String label) throws ServletException {
+        try {
+            field.setAccessible(true);
+            field.set(instance, value);
+        } catch (IllegalAccessException e) {
+            throw new ServletException("Paramètre " + label + " : champ inaccessible " + field.getName(), e);
+        }
+    }
+
+    private Object instantiate(Class<?> targetType, String name, Parameter parameter) throws ServletException {
+        try {
+            Constructor<?> constructor = targetType.getDeclaredConstructor();
+            if (!Modifier.isPublic(constructor.getModifiers())) {
+                constructor.setAccessible(true);
+            }
+            return constructor.newInstance();
+        } catch (NoSuchMethodException e) {
+            throw new ServletException("Paramètre " + name + " : la classe " + targetType.getName()
+                    + " doit avoir un constructeur vide pour etre liée" + describe(parameter), e);
+        } catch (Exception e) {
+            throw new ServletException("Paramètre " + name + " : impossible d'instancier " + targetType.getName()
+                    + describe(parameter), e);
+        }
+    }
+
+    private boolean hasDefaultConstructor(Class<?> type) {
+        try {
+            type.getDeclaredConstructor();
+            return true;
+        } catch (NoSuchMethodException e) {
+            return false;
+        }
+    }
+
+    private Object convertFieldValue(String value, Class<?> fieldType, String label) throws ServletException {
+        if (!isSimpleType(fieldType)) {
+            throw new ServletException("Paramètre " + label + " : impossible de convertir \"" + value + "\" en "
+                    + fieldType.getName() + ". Pour un objet, utilisez un préfixe (ex. " + label + ".*)");
+        }
+        return convertParamValue(value, fieldType, label);
+    }
+
+    private String describe(Parameter parameter) {
+        return " (paramètre " + parameter.getName()
+                + " de " + parameter.getDeclaringExecutable().getDeclaringClass().getName()
+                + "." + parameter.getDeclaringExecutable().getName() + ")";
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    private Object convertParamValue(String value, Class<?> targetType, String name) throws ServletException {
+        String raw = value.trim();
+
+        try {
+            if (targetType == String.class || targetType == CharSequence.class || targetType == Object.class) {
+                return value;
+            }
+            if (targetType == boolean.class || targetType == Boolean.class) {
+                return parseBoolean(raw);
+            }
+            if (targetType == char.class || targetType == Character.class) {
+                if (raw.length() != 1) {
+                    throw new ServletException("Paramètre " + name + " : un seul caractère est attendu, reçu \""
+                            + value + "\"");
+                }
+                return raw.charAt(0);
+            }
+            if (targetType == int.class || targetType == Integer.class) {
+                return (int) checkRange(Long.parseLong(raw), Integer.MIN_VALUE, Integer.MAX_VALUE, name, value);
+            }
+            if (targetType == long.class || targetType == Long.class) {
+                return Long.parseLong(raw);
+            }
+            if (targetType == short.class || targetType == Short.class) {
+                return (short) checkRange(Long.parseLong(raw), Short.MIN_VALUE, Short.MAX_VALUE, name, value);
+            }
+            if (targetType == byte.class || targetType == Byte.class) {
+                return (byte) checkRange(Long.parseLong(raw), Byte.MIN_VALUE, Byte.MAX_VALUE, name, value);
+            }
+            if (targetType == double.class || targetType == Double.class) {
+                return Double.parseDouble(raw);
+            }
+            if (targetType == float.class || targetType == Float.class) {
+                return Float.parseFloat(raw);
+            }
+            if (targetType == BigInteger.class) {
+                return new BigInteger(raw);
+            }
+            if (targetType == BigDecimal.class) {
+                return new BigDecimal(raw);
+            }
+            if (targetType.isEnum()) {
+                return Enum.valueOf((Class<Enum>) targetType, raw.toUpperCase());
+            }
+        } catch (ServletException e) {
+            throw e;
+        } catch (IllegalArgumentException e) {
+            throw new ServletException("Paramètre " + name + " : impossible de convertir \"" + value
+                    + "\" en " + targetType.getSimpleName(), e);
+        }
+
+        throw new ServletException("Paramètre " + name + " : type non supporté " + targetType.getName()
+                + ". Utilisez @MyRequestParam uniquement avec un type simple ou une énumération.");
+    }
+
+    private boolean parseBoolean(String raw) {
+        if ("true".equalsIgnoreCase(raw) || "on".equalsIgnoreCase(raw) || "yes".equalsIgnoreCase(raw)
+                || "1".equals(raw)) {
+            return true;
+        }
+        return false;
+    }
+
+    private long checkRange(long parsed, long min, long max, String name, String value) throws ServletException {
+        if (parsed < min || parsed > max) {
+            throw new ServletException("Paramètre " + name + " : la valeur \"" + value + "\" est hors limites ("
+                    + min + " à " + max + ")");
+        }
+        return parsed;
     }
 
     private void renderModelAndView(HttpServletRequest req, HttpServletResponse res, ModelAndView modelAndView)
@@ -401,17 +492,10 @@ public class FrontServlet extends HttpServlet {
             req.setAttribute(entry.getKey(), entry.getValue());
         }
 
-        String prefix = getServletContext().getInitParameter("prefix");
-        if (prefix == null) {
-            prefix = getServletContext().getInitParameter("viewPrefix");
-        }
+        String prefix = getServletContext().getInitParameter("viewPrefix");
+        String suffix = getServletContext().getInitParameter("viewSuffix");
         if (prefix == null) {
             prefix = "/WEB-INF/views/";
-        }
-
-        String suffix = getServletContext().getInitParameter("suffix");
-        if (suffix == null) {
-            suffix = getServletContext().getInitParameter("viewSuffix");
         }
         if (suffix == null) {
             suffix = ".jsp";
@@ -428,47 +512,4 @@ public class FrontServlet extends HttpServlet {
         return path.startsWith("/") ? path : "/" + path;
     }
 
-    private Mapping findMapping(String url) {
-        if (mappings == null) {
-            return null;
-        }
-        for (Mapping mapping : mappings) {
-            if (mapping.getUrl().equals(url)) {
-                return mapping;
-            }
-        }
-        return null;
-    }
-
-    private Mapping findMappingWithSameBase(String url) {
-        if (mappings == null) {
-            return null;
-        }
-        String urlBase = getBasePath(url);
-        for (Mapping mapping : mappings) {
-            if (getBasePath(mapping.getUrl()).equals(urlBase)) {
-                return mapping;
-            }
-        }
-        return null;
-    }
-
-    private String getBasePath(String url) {
-        String[] parts = url.split("/");
-        if (parts.length > 1) {
-            return "/" + parts[1];
-        }
-        return url;
-    }
-
-    private void printAllMappings(PrintWriter out) {
-        for (Mapping mapping : mappings) {
-            printMapping(out, mapping);
-        }
-    }
-
-    private void printMapping(PrintWriter out, Mapping mapping) {
-        out.println("<p>" + mapping.getUrl() + " : dans Controller (" + mapping.getController()
-                + ") la methode associee est " + mapping.getMethod() + "()</p>");
-    }
 }
