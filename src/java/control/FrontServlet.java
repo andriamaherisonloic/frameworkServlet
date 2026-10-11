@@ -11,6 +11,7 @@ import annotation.RepositoryAnnotation;
 import annotation.UrlMapping;
 import annotation.WebApi;
 import context.ApplicationContext;
+import exception.BindingException;
 import mapping.UrlMethod;
 import model.Model;
 import model.ModelAndView;
@@ -20,12 +21,14 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -36,7 +39,6 @@ import java.util.stream.Collectors;
 
 public class FrontServlet extends HttpServlet {
 
-    private static final int MAX_BINDING_DEPTH = 32;
     private static final int MAX_BINDING_PREFIXES = 4;
 
     private Map<UrlMethod, Method> urlMappings = new HashMap<>();
@@ -182,6 +184,10 @@ public class FrontServlet extends HttpServlet {
             }
 
             res.sendError(HttpServletResponse.SC_NO_CONTENT);
+        } catch (BindingException e) {
+            // Erreur de liaison : la faute est dans les données envoyees par le client.
+            getServletContext().log("Data binding : " + e.getMessage(), e);
+            res.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
         } catch (Exception e) {
             throw new ServletException("Erreur invocation de " + method.getName(), e);
         }
@@ -273,6 +279,62 @@ public class FrontServlet extends HttpServlet {
         if (Map.class.isAssignableFrom(parameterType)) {
             return new LinkedHashMap<String, Object>();
         }
+
+        // Sprint 7 : type simple non annote -> nom du parametre (flag -parameters),
+        // sinon valeur par defaut (null, 0, false, '\0').
+        if (isSimpleType(parameterType)) {
+            return resolveOptionalValue(parameter, parameter.getName(), req);
+        }
+
+        // Sprint 7 bis : objet complexe -> liaison champ par champ.
+        return bindObject(parameterType, new LinkedHashSet<>(List.of(parameter.getName())), req, parameter);
+    }
+
+    /**
+     * Lie un parametre de type simple facultatif : si la requete ne porte pas
+     * la valeur, on renvoie la valeur par defaut du type au lieu de lever une
+     * exception (evite {@code IllegalArgumentException} a l'invocation).
+     */
+    private Object resolveOptionalValue(Parameter parameter, String name, HttpServletRequest req) {
+        String raw = req.getParameter(name);
+        if (raw == null) {
+            return defaultValue(parameter.getType());
+        }
+        return convertParamValue(raw, parameter.getType(), name);
+    }
+
+    /**
+     * Valeur par defaut : {@code null} pour les references (String, wrappers),
+     * valeur neutre du type pour les primitifs.
+     */
+    private Object defaultValue(Class<?> type) {
+        if (!type.isPrimitive()) {
+            return null;
+        }
+        if (type == boolean.class) {
+            return Boolean.FALSE;
+        }
+        if (type == char.class) {
+            return '\0';
+        }
+        if (type == byte.class) {
+            return (byte) 0;
+        }
+        if (type == short.class) {
+            return (short) 0;
+        }
+        if (type == int.class) {
+            return 0;
+        }
+        if (type == long.class) {
+            return 0L;
+        }
+        if (type == float.class) {
+            return 0f;
+        }
+        if (type == double.class) {
+            return 0d;
+        }
         return null;
     }
 
@@ -283,12 +345,13 @@ public class FrontServlet extends HttpServlet {
         if (isSimpleType(targetType)) {
             String value = req.getParameter(name);
             if (value == null) {
-                throw new ServletException("Paramètre manquant : " + name + describe(parameter));
+                throw new BindingException("Paramètre obligatoire manquant : " + name + describe(parameter),
+                        name, null);
             }
             return convertParamValue(value, targetType, name);
         }
 
-        return bindObject(targetType, new LinkedHashSet<>(List.of(name)), req, parameter, 0);
+        return bindObject(targetType, new LinkedHashSet<>(List.of(name)), req, parameter);
     }
 
     private boolean isSimpleType(Class<?> type) {
@@ -302,49 +365,74 @@ public class FrontServlet extends HttpServlet {
                 || Number.class.isAssignableFrom(type);
     }
 
-    private Object bindObject(Class<?> targetType, Set<String> prefixes, HttpServletRequest req, Parameter parameter,
-            int depth) throws ServletException {
-        if (depth > MAX_BINDING_DEPTH) {
-            throw new ServletException("Paramètre " + prefixes.iterator().next()
-                    + " : imbrication d'objets trop profonde (max " + MAX_BINDING_DEPTH + ")" + describe(parameter));
-        }
+    /**
+     * Sprint 7 bis : lie les champs d'un objet complexe.
+     *
+     * <p>Regles :
+     * <ul>
+     *   <li>parcours la hierarchie : champs declares de la classe puis de ses
+     *       superclasses ;</li>
+     *   <li>champs statiques, finaux ou synthetiques ignores ;</li>
+     *   <li>injection via le setter {@code setXxx} s'il existe et qu'il est
+     *       compatible avec le type du champ, sinon acces direct ;</li>
+     *   <li>les champs de type non simple (objet imbrique, {@code List}...)
+     *       sont ignores et restent a leur valeur par defaut.</li>
+     * </ul>
+     */
+    private Object bindObject(Class<?> targetType, Set<String> prefixes, HttpServletRequest req, Parameter parameter)
+            throws ServletException {
+        Object instance = instantiate(targetType, primaryPrefix(prefixes), parameter);
 
-        Object instance = instantiate(targetType, prefixes.iterator().next(), parameter);
-
-        for (Field field : targetType.getDeclaredFields()) {
-            int modifiers = field.getModifiers();
-            if (Modifier.isStatic(modifiers) || Modifier.isFinal(modifiers) || field.isSynthetic()) {
+        for (Field field : collectFields(targetType)) {
+            // Les champs non simples restent a leur valeur par defaut.
+            if (!isSimpleType(field.getType())) {
                 continue;
             }
 
-            String fieldName = field.getName();
-            Set<String> candidates = new LinkedHashSet<>();
-            for (String prefix : prefixes) {
-                candidates.add(prefix + "." + fieldName);
-            }
-            candidates.add(fieldName);
-
+            String label = null;
             String value = null;
-            String label = candidates.iterator().next();
-            for (String candidate : candidates) {
-                value = req.getParameter(candidate);
-                if (value != null) {
+            for (String candidate : candidates(prefixes, field.getName())) {
+                String raw = req.getParameter(candidate);
+                if (raw != null) {
+                    value = raw;
                     label = candidate;
                     break;
                 }
             }
 
             if (value != null) {
-                setField(field, instance, convertFieldValue(value, field.getType(), label), label);
-            } else if (!isSimpleType(field.getType()) && hasDefaultConstructor(field.getType())) {
-                setField(field, instance, bindObject(field.getType(), trim(candidates), req, parameter, depth + 1),
-                        label);
+                injectValue(field, instance, convertFieldValue(value, field.getType(), label), label);
             }
         }
         return instance;
     }
 
-    private Set<String> trim(Set<String> candidates) {
+    /** Libelle principal, utilise uniquement dans les messages d'erreur. */
+    private String primaryPrefix(Set<String> prefixes) {
+        return prefixes.isEmpty() ? "objet" : prefixes.iterator().next();
+    }
+
+    /**
+     * Champs eligibles au binding, du plus specifique au plus general.
+     * {@code getDeclaredFields()} seul ne remonte pas la hierarchie.
+     */
+    private List<Field> collectFields(Class<?> type) {
+        List<Field> fields = new ArrayList<>();
+        for (Class<?> current = type; current != null && current != Object.class; current = current.getSuperclass()) {
+            fields.addAll(Arrays.asList(current.getDeclaredFields()));
+        }
+        return fields;
+    }
+
+    /** Noms de parametres possibles pour un champ : prefixes, puis nom nu. */
+    private Set<String> candidates(Set<String> prefixes, String fieldName) {
+        Set<String> candidates = new LinkedHashSet<>();
+        for (String prefix : prefixes) {
+            candidates.add(prefix + "." + fieldName);
+        }
+        candidates.add(fieldName);
+
+        // Au-dela du quota, on retombe sur le nom nu.
         Set<String> kept = new LinkedHashSet<>();
         for (String candidate : candidates) {
             if (kept.size() >= MAX_BINDING_PREFIXES) {
@@ -352,7 +440,76 @@ public class FrontServlet extends HttpServlet {
             }
             kept.add(candidate);
         }
+        kept.add(fieldName);
         return kept;
+    }
+
+    /**
+     * Cherche un setter {@code setXxx} compatible avec le type du champ.
+     * En cas de surcharge, le parametre le plus specifique est retenu.
+     */
+    private Method findSetter(Class<?> type, Field field) {
+        String setterName = "set"
+                + Character.toUpperCase(field.getName().charAt(0))
+                + field.getName().substring(1);
+
+        Method found = null;
+        for (Method candidate : type.getMethods()) {
+            if (!candidate.getName().equals(setterName) || candidate.getParameterCount() != 1) {
+                continue;
+            }
+            Class<?> parameterType = candidate.getParameterTypes()[0];
+            if (!isCompatible(field.getType(), parameterType)) {
+                continue;
+            }
+            if (found == null || isMoreSpecific(parameterType, found.getParameterTypes()[0])) {
+                found = candidate;
+            }
+        }
+        return found;
+    }
+
+    /** Le setter peut-il recevoir une valeur du type du champ ? */
+    private boolean isCompatible(Class<?> fieldType, Class<?> setterType) {
+        if (fieldType.equals(setterType)) {
+            return true;
+        }
+        // primitif -> wrapper (int -> Integer)
+        if (isWrapperOf(setterType, fieldType)) {
+            return true;
+        }
+        // un setter acceptant une supertype convient aussi (Integer -> Number/Object)
+        return setterType.isAssignableFrom(fieldType);
+    }
+
+    private boolean isWrapperOf(Class<?> wrapper, Class<?> primitive) {
+        return (primitive == boolean.class && wrapper == Boolean.class)
+                || (primitive == char.class && wrapper == Character.class)
+                || (primitive == byte.class && wrapper == Byte.class)
+                || (primitive == short.class && wrapper == Short.class)
+                || (primitive == int.class && wrapper == Integer.class)
+                || (primitive == long.class && wrapper == Long.class)
+                || (primitive == float.class && wrapper == Float.class)
+                || (primitive == double.class && wrapper == Double.class);
+    }
+
+    private boolean isMoreSpecific(Class<?> candidate, Class<?> current) {
+        return current.isAssignableFrom(candidate) && !candidate.equals(current);
+    }
+
+    /** Injecte via le setter s'il existe, sinon par acces direct au champ. */
+    private void injectValue(Field field, Object instance, Object value, String label) throws ServletException {
+        Method setter = findSetter(instance.getClass(), field);
+        if (setter != null) {
+            try {
+                setter.invoke(instance, value);
+                return;
+            } catch (IllegalAccessException | InvocationTargetException e) {
+                throw new BindingException("Paramètre " + label + " : le setter " + setter.getName()
+                        + " a échoué", e, label, null);
+            }
+        }
+        setField(field, instance, value, label);
     }
 
     private void setField(Field field, Object instance, Object value, String label) throws ServletException {
@@ -360,7 +517,8 @@ public class FrontServlet extends HttpServlet {
             field.setAccessible(true);
             field.set(instance, value);
         } catch (IllegalAccessException e) {
-            throw new ServletException("Paramètre " + label + " : champ inaccessible " + field.getName(), e);
+            throw new BindingException("Paramètre " + label + " : champ inaccessible " + field.getName(), e, label,
+                    null);
         }
     }
 
@@ -372,27 +530,18 @@ public class FrontServlet extends HttpServlet {
             }
             return constructor.newInstance();
         } catch (NoSuchMethodException e) {
-            throw new ServletException("Paramètre " + name + " : la classe " + targetType.getName()
-                    + " doit avoir un constructeur vide pour etre liée" + describe(parameter), e);
+            throw new BindingException("Paramètre " + name + " : la classe " + targetType.getName()
+                    + " doit avoir un constructeur vide pour etre liée" + describe(parameter), e, name, null);
         } catch (Exception e) {
-            throw new ServletException("Paramètre " + name + " : impossible d'instancier " + targetType.getName()
-                    + describe(parameter), e);
-        }
-    }
-
-    private boolean hasDefaultConstructor(Class<?> type) {
-        try {
-            type.getDeclaredConstructor();
-            return true;
-        } catch (NoSuchMethodException e) {
-            return false;
+            throw new BindingException("Paramètre " + name + " : impossible d'instancier " + targetType.getName()
+                    + describe(parameter), e, name, null);
         }
     }
 
     private Object convertFieldValue(String value, Class<?> fieldType, String label) throws ServletException {
         if (!isSimpleType(fieldType)) {
-            throw new ServletException("Paramètre " + label + " : impossible de convertir \"" + value + "\" en "
-                    + fieldType.getName() + ". Pour un objet, utilisez un préfixe (ex. " + label + ".*)");
+            throw new BindingException("Paramètre " + label + " : impossible de convertir \"" + value + "\" en "
+                    + fieldType.getName() + ". Pour un objet, utilisez un préfixe (ex. " + label + ".*)", label, value);
         }
         return convertParamValue(value, fieldType, label);
     }
@@ -404,7 +553,7 @@ public class FrontServlet extends HttpServlet {
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
-    private Object convertParamValue(String value, Class<?> targetType, String name) throws ServletException {
+    private Object convertParamValue(String value, Class<?> targetType, String name) {
         String raw = value.trim();
 
         try {
@@ -416,8 +565,8 @@ public class FrontServlet extends HttpServlet {
             }
             if (targetType == char.class || targetType == Character.class) {
                 if (raw.length() != 1) {
-                    throw new ServletException("Paramètre " + name + " : un seul caractère est attendu, reçu \""
-                            + value + "\"");
+                    throw new BindingException("Paramètre " + name + " : un seul caractère est attendu, reçu \""
+                            + value + "\"", name, value);
                 }
                 return raw.charAt(0);
             }
@@ -448,15 +597,15 @@ public class FrontServlet extends HttpServlet {
             if (targetType.isEnum()) {
                 return Enum.valueOf((Class<Enum>) targetType, raw.toUpperCase());
             }
-        } catch (ServletException e) {
+        } catch (BindingException e) {
             throw e;
         } catch (IllegalArgumentException e) {
-            throw new ServletException("Paramètre " + name + " : impossible de convertir \"" + value
-                    + "\" en " + targetType.getSimpleName(), e);
+            throw new BindingException("Paramètre " + name + " : impossible de convertir \"" + value
+                    + "\" en " + targetType.getSimpleName(), e, name, value);
         }
 
-        throw new ServletException("Paramètre " + name + " : type non supporté " + targetType.getName()
-                + ". Utilisez @MyRequestParam uniquement avec un type simple ou une énumération.");
+        throw new BindingException("Paramètre " + name + " : type non supporté " + targetType.getName()
+                + ". Utilisez @MyRequestParam uniquement avec un type simple ou une énumération.", name, value);
     }
 
     private boolean parseBoolean(String raw) {
@@ -467,10 +616,10 @@ public class FrontServlet extends HttpServlet {
         return false;
     }
 
-    private long checkRange(long parsed, long min, long max, String name, String value) throws ServletException {
+    private long checkRange(long parsed, long min, long max, String name, String value) {
         if (parsed < min || parsed > max) {
-            throw new ServletException("Paramètre " + name + " : la valeur \"" + value + "\" est hors limites ("
-                    + min + " à " + max + ")");
+            throw new BindingException("Paramètre " + name + " : la valeur \"" + value + "\" est hors limites ("
+                    + min + " à " + max + ")", name, value);
         }
         return parsed;
     }
