@@ -86,6 +86,12 @@ echo "========================="
 
 find "$SRC_DIR" -name "*.java" -printf '"%p"\n' > sources.txt
 
+# Copie des ressources (upload.properties) dans le futur jar.
+RES_DIR="src/main/resources"
+if [ -d "$RES_DIR" ]; then
+    cp -r "$RES_DIR"/. "$BUILD_DIR/classes/"
+fi
+
 if ! "$JAVAC" \
     -parameters \
     -encoding UTF-8 \
