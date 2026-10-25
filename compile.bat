@@ -16,9 +16,9 @@ echo =========================
 echo 1. COMPILATION FRAMEWORK
 echo =========================
 
-dir /s /b src\java\annotation\*.java src\java\context\*.java src\java\control\*.java src\java\listener\*.java src\java\mapping\*.java src\java\model\*.java src\java\util\*.java > sources_fw.txt
+dir /s /b src\java\*.java > sources_fw.txt
 
-javac -cp "%SERVLET_API%" -d build\classes @sources_fw.txt
+javac -parameters -encoding UTF-8 -cp "%SERVLET_API%" -d build\classes @sources_fw.txt
 
 if errorlevel 1 (
     echo ERREUR FRAMEWORK
@@ -28,6 +28,10 @@ if errorlevel 1 (
 )
 
 del sources_fw.txt
+
+if exist src\main\resources (
+    xcopy src\main\resources build\classes /E /I /Y > nul
+)
 
 echo =========================
 echo 2. CREATION JAR FRAMEWORK

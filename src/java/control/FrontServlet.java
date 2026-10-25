@@ -2,6 +2,7 @@ package control;
 
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.annotation.MultipartConfig;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -10,11 +11,15 @@ import annotation.MyRequestParam;
 import annotation.RepositoryAnnotation;
 import annotation.UrlMapping;
 import annotation.WebApi;
+import config.UploadConfig;
 import context.ApplicationContext;
 import exception.BindingException;
+import exception.UploadException;
 import mapping.UrlMethod;
+import model.MaFile;
 import model.Model;
 import model.ModelAndView;
+import service.MultipartResolver;
 import util.JsonSerializer;
 
 import java.io.IOException;
@@ -25,6 +30,8 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -37,17 +44,38 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * Front controller du framework.
+ *
+ * <p>Sprint 8 : le servlet est declare {@link MultipartConfig} afin que le
+ * conteneur expose {@code request.getParts()}. Les limites ci-dessous sont un
+ * plafond de securite absolu ; la limite fonctionnelle provient de
+ * {@code upload.max-size} dans {@code upload.properties} et ne peut etre que
+ * plus basse. Une application peut surcharger ces valeurs via
+ * {@code <multipart-config>} dans son {@code web.xml}.
+ */
+@MultipartConfig(
+        fileSizeThreshold = 1024 * 1024,          // 1 Mo en memoire, puis disque
+        maxFileSize = 50L * 1024 * 1024,          // plafond dur : 50 Mo / fichier
+        maxRequestSize = 60L * 1024 * 1024)       // plafond dur : 60 Mo / requete
 public class FrontServlet extends HttpServlet {
 
     private static final int MAX_BINDING_PREFIXES = 4;
 
     private Map<UrlMethod, Method> urlMappings = new HashMap<>();
     private ApplicationContext applicationContext;
+    private UploadConfig uploadConfig;
+    private MultipartResolver multipartResolver;
 
     @Override
     public void init() throws ServletException {
         super.init();
         applicationContext = (ApplicationContext) getServletContext().getAttribute("applicationContext");
+
+        Object configured = getServletContext().getAttribute("uploadConfig");
+        uploadConfig = (configured instanceof UploadConfig cfg) ? cfg : UploadConfig.load(getServletContext());
+        multipartResolver = new MultipartResolver(uploadConfig);
+
         rebuildRegistry();
     }
 
@@ -188,6 +216,14 @@ public class FrontServlet extends HttpServlet {
             // Erreur de liaison : la faute est dans les données envoyees par le client.
             getServletContext().log("Data binding : " + e.getMessage(), e);
             res.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+        } catch (UploadException e) {
+            getServletContext().log("Upload : " + e.getMessage(), e);
+            if (e.isClientError()) {
+                res.sendError(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+            } else {
+                res.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                        "Erreur de stockage du fichier");
+            }
         } catch (Exception e) {
             throw new ServletException("Erreur invocation de " + method.getName(), e);
         }
@@ -262,6 +298,12 @@ public class FrontServlet extends HttpServlet {
     private Object resolveArgument(Parameter parameter, HttpServletRequest req, HttpServletResponse res)
             throws ServletException {
         MyRequestParam requestParam = parameter.getAnnotation(MyRequestParam.class);
+
+        // Sprint 8 : fichier(s) envoye(s) en multipart/form-data.
+        if (isFileType(parameter)) {
+            return resolveFile(parameter, requestParam, req);
+        }
+
         if (requestParam != null) {
             return resolveRequestParam(parameter, requestParam.value(), req);
         }
@@ -352,6 +394,86 @@ public class FrontServlet extends HttpServlet {
         }
 
         return bindObject(targetType, new LinkedHashSet<>(List.of(name)), req, parameter);
+    }
+
+    /**
+     * Sprint 8 : vrai si le parametre attend un ou plusieurs fichiers.
+     * Types supportes : {@code MaFile}, {@code MaFile[]}, {@code List<MaFile>}.
+     */
+    private boolean isFileType(Parameter parameter) {
+        Class<?> type = parameter.getType();
+        if (type == MaFile.class || type == MaFile[].class) {
+            return true;
+        }
+        if (List.class.isAssignableFrom(type)) {
+            Type generic = parameter.getParameterizedType();
+            if (generic instanceof ParameterizedType parameterized) {
+                return parameterized.getActualTypeArguments()[0] == MaFile.class;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Resout un parametre fichier.
+     *
+     * <p>Semantique coherente avec Sprint 7 : un parametre annote
+     * {@code @MyRequestParam} est obligatoire, un parametre nu est facultatif
+     * (null / tableau vide / liste vide si absent).
+     */
+    private Object resolveFile(Parameter parameter, MyRequestParam requestParam, HttpServletRequest req) {
+        String name = requestParam != null ? requestParam.value() : parameter.getName();
+        boolean required = requestParam != null;
+        Class<?> type = parameter.getType();
+        MultipartResolver resolver = multipartResolver();
+
+        if (!resolver.isMultipart(req)) {
+            if (required) {
+                throw new UploadException("Fichier obligatoire manquant : " + name
+                        + describe(parameter) + " (requete non multipart)");
+            }
+            return emptyFileValue(type);
+        }
+
+        if (type == MaFile.class) {
+            MaFile file = resolver.resolve(req, name);
+            if (file == null && required) {
+                throw new UploadException("Fichier obligatoire manquant : " + name + describe(parameter));
+            }
+            return file;
+        }
+
+        List<MaFile> files = resolver.resolveAll(req, name);
+        if (required && files.isEmpty()) {
+            throw new UploadException("Au moins un fichier est obligatoire : " + name + describe(parameter));
+        }
+        if (type.isArray()) {
+            return files.toArray(new MaFile[0]);
+        }
+        return files;
+    }
+
+    /** Initialisation paresseuse : le servlet peut etre utilise hors conteneur. */
+    private MultipartResolver multipartResolver() {
+        if (multipartResolver == null) {
+            if (uploadConfig == null) {
+                jakarta.servlet.ServletConfig servletConfig = getServletConfig();
+                uploadConfig = UploadConfig.load(
+                        servletConfig == null ? null : servletConfig.getServletContext());
+            }
+            multipartResolver = new MultipartResolver(uploadConfig);
+        }
+        return multipartResolver;
+    }
+
+    private Object emptyFileValue(Class<?> type) {
+        if (type.isArray()) {
+            return new MaFile[0];
+        }
+        if (List.class.isAssignableFrom(type)) {
+            return new ArrayList<MaFile>();
+        }
+        return null;
     }
 
     private boolean isSimpleType(Class<?> type) {

@@ -24,6 +24,17 @@ public class ApplicationContext {
     private final DatabaseConfig databaseConfig;
 
     public ApplicationContext(String packagesList, DatabaseConfig databaseConfig) {
+        this(packagesList, databaseConfig, Map.of());
+    }
+
+    /**
+     * Construit le contexte en y enregistrant des services fournis par le
+     * framework (Sprint 8 : {@code FileStorageService}, {@code UploadConfig}).
+     * Ces beans sont disponibles pour l'injection {@code @Autowired} dans les
+     * controleurs, sans etre scannes comme des composants applicatifs.
+     */
+    public ApplicationContext(String packagesList, DatabaseConfig databaseConfig,
+            Map<Class<?>, Object> frameworkBeans) {
         this.databaseConfig = databaseConfig;
         try {
             String[] packages = packagesList.split(",");
@@ -34,10 +45,24 @@ public class ApplicationContext {
                     allClasses.addAll(scanPackage(trimmed));
                 }
             }
+            registerFrameworkBeans(frameworkBeans);
             instantiateBeans(allClasses);
             injectDependencies();
         } catch (Exception e) {
             throw new RuntimeException("Erreur initialisation ApplicationContext", e);
+        }
+    }
+
+    private void registerFrameworkBeans(Map<Class<?>, Object> frameworkBeans) {
+        if (frameworkBeans == null) {
+            return;
+        }
+        for (Map.Entry<Class<?>, Object> entry : frameworkBeans.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+            beans.put(entry.getKey(), entry.getValue());
+            beanNames.put(entry.getKey().getName(), entry.getKey());
         }
     }
 
