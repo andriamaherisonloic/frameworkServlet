@@ -7,6 +7,7 @@ import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
+import annotation.AuthRequired;
 import annotation.MyRequestParam;
 import annotation.RepositoryAnnotation;
 import annotation.UrlMapping;
@@ -69,6 +70,7 @@ public class FrontServlet extends HttpServlet {
     private UploadConfig uploadConfig;
     private MultipartResolver multipartResolver;
     private SessionManager sessionManager;
+    private String authSessionAttribute = "connecte";
 
     @Override
     public void init() throws ServletException {
@@ -81,11 +83,11 @@ public class FrontServlet extends HttpServlet {
             sessionManager = SessionManager.getInstance();
         }
 
-        Object configuredSessionTimeout = getServletContext().getInitParameter("session-timeout");
-        if (configuredSessionTimeout != null) {
+        Object configuredSessionTimeoutMinutes = getServletContext().getInitParameter("session-timeout");
+        if (configuredSessionTimeoutMinutes != null) {
             try {
-                sessionManager.setDefaultMaxInactiveIntervalSeconds(
-                        Integer.parseInt(String.valueOf(configuredSessionTimeout)) * 60);
+                int timeoutMinutes = Integer.parseInt(String.valueOf(configuredSessionTimeoutMinutes));
+                sessionManager.setDefaultMaxInactiveIntervalSeconds(timeoutMinutes * 60);
             } catch (NumberFormatException ignored) {
             }
         }
@@ -94,8 +96,24 @@ public class FrontServlet extends HttpServlet {
             getServletContext().setAttribute("sessionManager", sessionManager);
         }
 
-        Object configured = getServletContext().getAttribute("uploadConfig");
-        uploadConfig = (configured instanceof UploadConfig cfg) ? cfg : UploadConfig.load(getServletContext());
+        // Sprint 10 : nom de l'attribut de session representant l'utilisateur authentifie.
+        String configuredAuthAttributeName = null;
+        try {
+            configuredAuthAttributeName = getServletContext().getInitParameter("auth.session.attribute");
+        } catch (Exception ignored) {
+        }
+        if (configuredAuthAttributeName == null || configuredAuthAttributeName.isBlank()) {
+            try {
+                configuredAuthAttributeName = getServletConfig().getInitParameter("auth.session.attribute");
+            } catch (Exception ignored) {
+            }
+        }
+        if (configuredAuthAttributeName != null && !configuredAuthAttributeName.isBlank()) {
+            authSessionAttribute = configuredAuthAttributeName.trim();
+        }
+
+        Object configuredUploadConfig = getServletContext().getAttribute("uploadConfig");
+        uploadConfig = (configuredUploadConfig instanceof UploadConfig cfg) ? cfg : UploadConfig.load(getServletContext());
         multipartResolver = new MultipartResolver(uploadConfig);
 
         rebuildRegistry();
@@ -210,6 +228,17 @@ public class FrontServlet extends HttpServlet {
             return;
         }
 
+        // Sprint 10 : protection par authentification.
+        if (method.isAnnotationPresent(AuthRequired.class)) {
+            if (!isAuthenticated(req)) {
+                try {
+                    res.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Authentification requise");
+                } catch (Exception ignored) {
+                }
+                return;
+            }
+        }
+
         try {
             Object controller = getControllerInstance(method.getDeclaringClass().getName());
             if (controller == null) {
@@ -217,23 +246,8 @@ public class FrontServlet extends HttpServlet {
                 return;
             }
 
-            Object result = method.invoke(controller, buildArguments(method, req, res));
-            if (isWebApi(method)) {
-                renderJson(res, result);
-                return;
-            }
-
-            if (result instanceof ModelAndView) {
-                renderModelAndView(req, res, (ModelAndView) result);
-                return;
-            }
-
-            if (result instanceof String) {
-                renderView(req, res, (String) result, Map.of());
-                return;
-            }
-
-            res.sendError(HttpServletResponse.SC_NO_CONTENT);
+            Object result = invokeActionMethod(method, controller, req, res);
+            renderActionResult(req, res, method, result);
         } catch (BindingException e) {
             // Erreur de liaison : la faute est dans les données envoyees par le client.
             getServletContext().log("Data binding : " + e.getMessage(), e);
@@ -305,6 +319,119 @@ public class FrontServlet extends HttpServlet {
         return sessionManager;
     }
 
+    // ---------------------------------------------------------------------
+    // Sprint 10 : authentification
+    // ---------------------------------------------------------------------
+
+    public String getAuthSessionAttribute() {
+        return authSessionAttribute;
+    }
+
+    public void setAuthSessionAttribute(String name) {
+        if (name != null && !name.isBlank()) {
+            authSessionAttribute = name.trim();
+        }
+    }
+
+    public boolean isProtected(Method method) {
+        return method != null && method.isAnnotationPresent(AuthRequired.class);
+    }
+
+    public boolean requiresAuth(Method method) {
+        return isProtected(method);
+    }
+
+    public boolean isAuthenticated(HttpServletRequest request) {
+        return isAuthenticated(request, null);
+    }
+
+    public boolean isAuthenticated(HttpServletRequest request, HttpServletResponse response) {
+        if (request == null) {
+            return false;
+        }
+        String attr = (authSessionAttribute == null || authSessionAttribute.isBlank())
+                ? "connecte" : authSessionAttribute;
+        Object session = null;
+        try {
+            session = getSessionManager().getOrCreate(request, response);
+        } catch (Exception e) {
+            return false;
+        }
+        if (session == null) {
+            return false;
+        }
+        Object value = null;
+        try {
+            java.lang.reflect.Method getter = session.getClass().getMethod("getAttribute", String.class);
+            value = getter.invoke(session, attr);
+        } catch (Exception e) {
+            // Compatibilite : essai avec une methode generique.
+            try {
+                java.lang.reflect.Method getter = session.getClass().getMethod("get", String.class);
+                value = getter.invoke(session, attr);
+            } catch (Exception ignored) {
+            }
+        }
+        return isUserAuthenticated(value);
+    }
+
+    public boolean checkAuth(Method method, HttpServletRequest request, HttpServletResponse response) {
+        if (!isProtected(method)) {
+            return true;
+        }
+        return isAuthenticated(request, response);
+    }
+
+    public boolean authorize(Method method, HttpServletRequest request, HttpServletResponse response) {
+        return checkAuth(method, request, response);
+    }
+
+    private boolean isUserAuthenticated(Object value) {
+        if (value == null) {
+            return false;
+        }
+        // Une simple chaine arbitraire (ou valeur primitive) ne suffit pas.
+        if (value instanceof CharSequence) {
+            return false;
+        }
+        if (value instanceof Number || value instanceof Boolean || value instanceof Character) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Invoque la methode d'action avec les arguments resolus par le framework.
+     */
+    private Object invokeActionMethod(Method method, Object controller,
+            HttpServletRequest request, HttpServletResponse response) throws Exception {
+        Object[] arguments = buildArguments(method, request, response);
+        return method.invoke(controller, arguments);
+    }
+
+    /**
+     * Affiche le resultat d'une methode d'action selon son type.
+     */
+    private void renderActionResult(HttpServletRequest request, HttpServletResponse response,
+            Method method, Object result) throws ServletException, IOException {
+        if (isWebApi(method)) {
+            renderJson(response, result);
+            return;
+        }
+
+        if (result instanceof ModelAndView modelAndView) {
+            renderModelAndView(request, response, modelAndView);
+            return;
+        }
+
+        if (result instanceof String viewName) {
+            renderView(request, response, viewName, Map.of());
+            return;
+        }
+
+        response.sendError(HttpServletResponse.SC_NO_CONTENT);
+    }
+
     private void renderControllerIndex(HttpServletResponse res) throws IOException {
         List<String> controllers = new ArrayList<>();
         for (Class<?> clazz : applicationContext.getBeanClasses()) {
@@ -332,6 +459,9 @@ public class FrontServlet extends HttpServlet {
 
     private Object[] buildArguments(Method method, HttpServletRequest req, HttpServletResponse res)
             throws ServletException {
+        if (method != null && method.isAnnotationPresent(AuthRequired.class) && !isAuthenticated(req)) {
+            throw new ServletException("Authentification requise");
+        }
         Parameter[] parameters = method.getParameters();
         Object[] arguments = new Object[parameters.length];
         for (int i = 0; i < parameters.length; i++) {
