@@ -13,6 +13,8 @@ import annotation.UrlMapping;
 import annotation.WebApi;
 import config.UploadConfig;
 import context.ApplicationContext;
+import context.SessionHandle;
+import context.SessionManager;
 import exception.BindingException;
 import exception.UploadException;
 import mapping.UrlMethod;
@@ -66,11 +68,31 @@ public class FrontServlet extends HttpServlet {
     private ApplicationContext applicationContext;
     private UploadConfig uploadConfig;
     private MultipartResolver multipartResolver;
+    private SessionManager sessionManager;
 
     @Override
     public void init() throws ServletException {
         super.init();
         applicationContext = (ApplicationContext) getServletContext().getAttribute("applicationContext");
+
+        if (applicationContext != null) {
+            sessionManager = applicationContext.getSessionManager();
+        } else {
+            sessionManager = SessionManager.getInstance();
+        }
+
+        Object configuredSessionTimeout = getServletContext().getInitParameter("session-timeout");
+        if (configuredSessionTimeout != null) {
+            try {
+                sessionManager.setDefaultMaxInactiveIntervalSeconds(
+                        Integer.parseInt(String.valueOf(configuredSessionTimeout)) * 60);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+
+        if (getServletContext().getAttribute("sessionManager") == null && sessionManager != null) {
+            getServletContext().setAttribute("sessionManager", sessionManager);
+        }
 
         Object configured = getServletContext().getAttribute("uploadConfig");
         uploadConfig = (configured instanceof UploadConfig cfg) ? cfg : UploadConfig.load(getServletContext());
@@ -260,6 +282,29 @@ public class FrontServlet extends HttpServlet {
         return applicationContext.getBean(className);
     }
 
+    public SessionManager getSessionManager() {
+        if (sessionManager == null) {
+            if (applicationContext != null) {
+                sessionManager = applicationContext.getSessionManager();
+            }
+            if (sessionManager == null) {
+                try {
+                    if (getServletContext() != null) {
+                        Object fromContext = getServletContext().getAttribute("sessionManager");
+                        if (fromContext instanceof SessionManager) {
+                            sessionManager = (SessionManager) fromContext;
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (sessionManager == null) {
+                sessionManager = SessionManager.getInstance();
+            }
+        }
+        return sessionManager;
+    }
+
     private void renderControllerIndex(HttpServletResponse res) throws IOException {
         List<String> controllers = new ArrayList<>();
         for (Class<?> clazz : applicationContext.getBeanClasses()) {
@@ -320,6 +365,12 @@ public class FrontServlet extends HttpServlet {
         }
         if (Map.class.isAssignableFrom(parameterType)) {
             return new LinkedHashMap<String, Object>();
+        }
+
+        // Sprint 9 : injection automatique de la session personnalisee.
+        if (parameterType.getSimpleName().equals("Session")
+                || SessionHandle.class.isAssignableFrom(parameterType)) {
+            return getSessionManager().getOrCreate(req, res, parameterType);
         }
 
         // Sprint 7 : type simple non annote -> nom du parametre (flag -parameters),
