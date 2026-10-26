@@ -83,11 +83,11 @@ public class FrontServlet extends HttpServlet {
             sessionManager = SessionManager.getInstance();
         }
 
-        Object configuredSessionTimeout = getServletContext().getInitParameter("session-timeout");
-        if (configuredSessionTimeout != null) {
+        Object configuredSessionTimeoutMinutes = getServletContext().getInitParameter("session-timeout");
+        if (configuredSessionTimeoutMinutes != null) {
             try {
-                sessionManager.setDefaultMaxInactiveIntervalSeconds(
-                        Integer.parseInt(String.valueOf(configuredSessionTimeout)) * 60);
+                int timeoutMinutes = Integer.parseInt(String.valueOf(configuredSessionTimeoutMinutes));
+                sessionManager.setDefaultMaxInactiveIntervalSeconds(timeoutMinutes * 60);
             } catch (NumberFormatException ignored) {
             }
         }
@@ -97,23 +97,23 @@ public class FrontServlet extends HttpServlet {
         }
 
         // Sprint 10 : nom de l'attribut de session representant l'utilisateur authentifie.
-        String configuredAuthAttr = null;
+        String configuredAuthAttributeName = null;
         try {
-            configuredAuthAttr = getServletContext().getInitParameter("auth.session.attribute");
+            configuredAuthAttributeName = getServletContext().getInitParameter("auth.session.attribute");
         } catch (Exception ignored) {
         }
-        if (configuredAuthAttr == null || configuredAuthAttr.isBlank()) {
+        if (configuredAuthAttributeName == null || configuredAuthAttributeName.isBlank()) {
             try {
-                configuredAuthAttr = getServletConfig().getInitParameter("auth.session.attribute");
+                configuredAuthAttributeName = getServletConfig().getInitParameter("auth.session.attribute");
             } catch (Exception ignored) {
             }
         }
-        if (configuredAuthAttr != null && !configuredAuthAttr.isBlank()) {
-            authSessionAttribute = configuredAuthAttr.trim();
+        if (configuredAuthAttributeName != null && !configuredAuthAttributeName.isBlank()) {
+            authSessionAttribute = configuredAuthAttributeName.trim();
         }
 
-        Object configured = getServletContext().getAttribute("uploadConfig");
-        uploadConfig = (configured instanceof UploadConfig cfg) ? cfg : UploadConfig.load(getServletContext());
+        Object configuredUploadConfig = getServletContext().getAttribute("uploadConfig");
+        uploadConfig = (configuredUploadConfig instanceof UploadConfig cfg) ? cfg : UploadConfig.load(getServletContext());
         multipartResolver = new MultipartResolver(uploadConfig);
 
         rebuildRegistry();
@@ -246,23 +246,8 @@ public class FrontServlet extends HttpServlet {
                 return;
             }
 
-            Object result = method.invoke(controller, buildArguments(method, req, res));
-            if (isWebApi(method)) {
-                renderJson(res, result);
-                return;
-            }
-
-            if (result instanceof ModelAndView) {
-                renderModelAndView(req, res, (ModelAndView) result);
-                return;
-            }
-
-            if (result instanceof String) {
-                renderView(req, res, (String) result, Map.of());
-                return;
-            }
-
-            res.sendError(HttpServletResponse.SC_NO_CONTENT);
+            Object result = invokeActionMethod(method, controller, req, res);
+            renderActionResult(req, res, method, result);
         } catch (BindingException e) {
             // Erreur de liaison : la faute est dans les données envoyees par le client.
             getServletContext().log("Data binding : " + e.getMessage(), e);
@@ -413,6 +398,38 @@ public class FrontServlet extends HttpServlet {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Invoque la methode d'action avec les arguments resolus par le framework.
+     */
+    private Object invokeActionMethod(Method method, Object controller,
+            HttpServletRequest request, HttpServletResponse response) throws Exception {
+        Object[] arguments = buildArguments(method, request, response);
+        return method.invoke(controller, arguments);
+    }
+
+    /**
+     * Affiche le resultat d'une methode d'action selon son type.
+     */
+    private void renderActionResult(HttpServletRequest request, HttpServletResponse response,
+            Method method, Object result) throws ServletException, IOException {
+        if (isWebApi(method)) {
+            renderJson(response, result);
+            return;
+        }
+
+        if (result instanceof ModelAndView modelAndView) {
+            renderModelAndView(request, response, modelAndView);
+            return;
+        }
+
+        if (result instanceof String viewName) {
+            renderView(request, response, viewName, Map.of());
+            return;
+        }
+
+        response.sendError(HttpServletResponse.SC_NO_CONTENT);
     }
 
     private void renderControllerIndex(HttpServletResponse res) throws IOException {
