@@ -58,6 +58,7 @@ public class FrontServletListener implements ServletContextListener {
             context.setAttribute("applicationContext", applicationContext);
             context.setAttribute("uploadConfig", uploadConfig);
             context.setAttribute("fileStorageService", fileStorageService);
+            context.setAttribute("sessionManager", applicationContext.getSessionManager());
         } catch (Exception e) {
             throw new RuntimeException("Erreur initialisation ApplicationContext", e);
         }

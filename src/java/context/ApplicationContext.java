@@ -14,6 +14,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
 import java.util.Map;
 
 public class ApplicationContext {
@@ -22,6 +25,7 @@ public class ApplicationContext {
     private final Map<String, Class<?>> beanNames = new HashMap<>();
     private final List<Class<?>> beanClasses = new ArrayList<>();
     private final DatabaseConfig databaseConfig;
+    private final SessionManager sessionManager;
 
     public ApplicationContext(String packagesList, DatabaseConfig databaseConfig) {
         this(packagesList, databaseConfig, Map.of());
@@ -36,6 +40,7 @@ public class ApplicationContext {
     public ApplicationContext(String packagesList, DatabaseConfig databaseConfig,
             Map<Class<?>, Object> frameworkBeans) {
         this.databaseConfig = databaseConfig;
+        this.sessionManager = new SessionManager(30 * 60);
         try {
             String[] packages = packagesList.split(",");
             List<Class<?>> allClasses = new ArrayList<>();
@@ -184,5 +189,46 @@ public class ApplicationContext {
 
     public DatabaseConfig getDatabaseConfig() {
         return databaseConfig;
+    }
+
+    public SessionManager getSessionManager() {
+        return sessionManager;
+    }
+
+    public Object getSession(HttpServletRequest request) {
+        return getSession(request, (HttpServletResponse) null);
+    }
+
+    public Object getSession(HttpServletRequest request, HttpServletResponse response) {
+        if (sessionManager == null) {
+            return null;
+        }
+        return sessionManager.getOrCreate(request, response, Session.class);
+    }
+
+    public Object getSession(HttpServletRequest request, Class<?> sessionType) {
+        if (sessionManager == null) {
+            return null;
+        }
+        return sessionManager.getOrCreate(request, null,
+                sessionType == null ? Session.class : sessionType);
+    }
+
+    public Object createSession(HttpServletRequest request) {
+        return getSession(request, (HttpServletResponse) null);
+    }
+
+    public Object createSession(HttpServletRequest request, HttpServletResponse response) {
+        return getSession(request, response);
+    }
+
+    public void removeSession(String id) {
+        invalidateSession(id);
+    }
+
+    public void invalidateSession(String id) {
+        if (sessionManager != null) {
+            sessionManager.invalidate(id);
+        }
     }
 }
