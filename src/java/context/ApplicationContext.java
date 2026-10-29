@@ -5,20 +5,25 @@ import annotation.FWController;
 import annotation.MyController;
 import annotation.RepositoryAnnotation;
 
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
 import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.net.URL;
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-
 import java.util.Map;
 
+/**
+ * Contexte global du framework : scan des controleurs, instanciation des beans,
+ * injection des dependances et acces au gestionnaire de sessions.
+ */
 public class ApplicationContext {
 
     private final Map<Class<?>, Object> beans = new HashMap<>();
@@ -27,34 +32,21 @@ public class ApplicationContext {
     private final DatabaseConfig databaseConfig;
     private final SessionManager sessionManager;
 
-    public ApplicationContext(String packagesList, DatabaseConfig databaseConfig) {
-        this(packagesList, databaseConfig, Map.of());
+    public ApplicationContext(String packagesToScan, DatabaseConfig databaseConfig) {
+        this(packagesToScan, databaseConfig, Map.of());
     }
 
-    /**
-     * Construit le contexte en y enregistrant des services fournis par le
-     * framework (Sprint 8 : {@code FileStorageService}, {@code UploadConfig}).
-     * Ces beans sont disponibles pour l'injection {@code @Autowired} dans les
-     * controleurs, sans etre scannes comme des composants applicatifs.
-     */
-    public ApplicationContext(String packagesList, DatabaseConfig databaseConfig,
+    public ApplicationContext(String packagesToScan, DatabaseConfig databaseConfig,
             Map<Class<?>, Object> frameworkBeans) {
         this.databaseConfig = databaseConfig;
         this.sessionManager = new SessionManager(30 * 60);
         try {
-            String[] packages = packagesList.split(",");
-            List<Class<?>> allClasses = new ArrayList<>();
-            for (String pkg : packages) {
-                String trimmed = pkg.trim();
-                if (!trimmed.isEmpty()) {
-                    allClasses.addAll(scanPackage(trimmed));
-                }
-            }
+            List<Class<?>> discoveredClasses = scanPackages(packagesToScan);
             registerFrameworkBeans(frameworkBeans);
-            instantiateBeans(allClasses);
+            instantiateBeans(discoveredClasses);
             injectDependencies();
-        } catch (Exception e) {
-            throw new RuntimeException("Erreur initialisation ApplicationContext", e);
+        } catch (Exception exception) {
+            throw new RuntimeException("Erreur initialisation ApplicationContext", exception);
         }
     }
 
@@ -71,11 +63,25 @@ public class ApplicationContext {
         }
     }
 
+    private List<Class<?>> scanPackages(String packagesToScan) throws Exception {
+        List<Class<?>> discoveredClasses = new ArrayList<>();
+        if (packagesToScan == null || packagesToScan.isBlank()) {
+            return discoveredClasses;
+        }
+        for (String packageName : packagesToScan.split(",")) {
+            String trimmedPackageName = packageName.trim();
+            if (!trimmedPackageName.isEmpty()) {
+                discoveredClasses.addAll(scanPackage(trimmedPackageName));
+            }
+        }
+        return discoveredClasses;
+    }
+
     private List<Class<?>> scanPackage(String packageName) throws Exception {
         List<Class<?>> result = new ArrayList<>();
-        String path = packageName.replace('.', '/');
+        String resourcePath = packageName.replace('.', '/');
         ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
-        URL resource = classLoader.getResource(path);
+        URL resource = classLoader.getResource(resourcePath);
         if (resource == null) {
             return result;
         }
@@ -87,17 +93,22 @@ public class ApplicationContext {
         }
 
         for (File file : files) {
-            if (file.getName().endsWith(".class")) {
-                String className = packageName + "." + file.getName().replace(".class", "");
-                Class<?> clazz = Class.forName(className);
-                if (clazz.isAnnotationPresent(MyController.class)
-                        || clazz.isAnnotationPresent(FWController.class)
-                        || clazz.isAnnotationPresent(RepositoryAnnotation.class)) {
-                    result.add(clazz);
-                }
+            if (!file.getName().endsWith(".class")) {
+                continue;
+            }
+            String className = packageName + "." + file.getName().replace(".class", "");
+            Class<?> clazz = Class.forName(className);
+            if (isFrameworkComponent(clazz)) {
+                result.add(clazz);
             }
         }
         return result;
+    }
+
+    private boolean isFrameworkComponent(Class<?> clazz) {
+        return clazz.isAnnotationPresent(MyController.class)
+                || clazz.isAnnotationPresent(FWController.class)
+                || clazz.isAnnotationPresent(RepositoryAnnotation.class);
     }
 
     private void instantiateBeans(List<Class<?>> classes) throws Exception {
@@ -112,19 +123,19 @@ public class ApplicationContext {
             beanClasses.add(clazz);
 
             if (databaseConfig != null && clazz.isAnnotationPresent(RepositoryAnnotation.class)) {
-                injectConnection(instance);
+                injectDatabaseConnection(instance);
             }
         }
     }
 
-    private void injectConnection(Object instance) {
+    private void injectDatabaseConnection(Object instance) {
         for (Field field : instance.getClass().getDeclaredFields()) {
-            if (field.getType().getName().equals("java.sql.Connection")) {
+            if (field.getType() == Connection.class) {
                 try {
                     field.setAccessible(true);
                     field.set(instance, databaseConfig.getConnection());
-                } catch (Exception e) {
-                    e.printStackTrace();
+                } catch (Exception exception) {
+                    exception.printStackTrace();
                 }
             }
         }
@@ -133,16 +144,18 @@ public class ApplicationContext {
     private void injectDependencies() {
         for (Object bean : beans.values()) {
             for (Field field : bean.getClass().getDeclaredFields()) {
-                if (field.isAnnotationPresent(Autowired.class)) {
-                    Object dependency = findBeanByType(field.getType());
-                    if (dependency != null) {
-                        try {
-                            field.setAccessible(true);
-                            field.set(bean, dependency);
-                        } catch (Exception e) {
-                            e.printStackTrace();
-                        }
-                    }
+                if (!field.isAnnotationPresent(Autowired.class)) {
+                    continue;
+                }
+                Object dependency = findBeanByType(field.getType());
+                if (dependency == null) {
+                    continue;
+                }
+                try {
+                    field.setAccessible(true);
+                    field.set(bean, dependency);
+                } catch (Exception exception) {
+                    exception.printStackTrace();
                 }
             }
         }
@@ -173,10 +186,10 @@ public class ApplicationContext {
 
     public Object getBean(String className) {
         Class<?> clazz = beanNames.get(className);
-        if (clazz != null) {
-            return beans.get(clazz);
+        if (clazz == null) {
+            return null;
         }
-        return null;
+        return beans.get(clazz);
     }
 
     public List<Class<?>> getBeanClasses() {
@@ -222,13 +235,13 @@ public class ApplicationContext {
         return getSession(request, response);
     }
 
-    public void removeSession(String id) {
-        invalidateSession(id);
+    public void removeSession(String sessionId) {
+        invalidateSession(sessionId);
     }
 
-    public void invalidateSession(String id) {
+    public void invalidateSession(String sessionId) {
         if (sessionManager != null) {
-            sessionManager.invalidate(id);
+            sessionManager.invalidate(sessionId);
         }
     }
 }

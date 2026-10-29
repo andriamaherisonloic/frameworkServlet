@@ -9,6 +9,7 @@ import jakarta.servlet.http.HttpServletResponse;
 
 import annotation.AuthRequired;
 import annotation.MyRequestParam;
+import annotation.RoleRequired;
 import annotation.RepositoryAnnotation;
 import annotation.UrlMapping;
 import annotation.WebApi;
@@ -65,7 +66,7 @@ public class FrontServlet extends HttpServlet {
 
     private static final int MAX_BINDING_PREFIXES = 4;
 
-    private Map<UrlMethod, Method> urlMappings = new HashMap<>();
+    private Map<UrlMethod, Method> urlToMethodMappings = new HashMap<>();
     private ApplicationContext applicationContext;
     private UploadConfig uploadConfig;
     private MultipartResolver multipartResolver;
@@ -133,7 +134,7 @@ public class FrontServlet extends HttpServlet {
 
     private void rebuildRegistry() throws ServletException {
         try {
-            urlMappings = new HashMap<>();
+            urlToMethodMappings = new HashMap<>();
 
             for (Class<?> controllerClass : applicationContext.getBeanClasses()) {
                 if (controllerClass.isAnnotationPresent(RepositoryAnnotation.class)) {
@@ -142,8 +143,8 @@ public class FrontServlet extends HttpServlet {
 
                 Map<UrlMethod, Method> classMappings = getUrlMappings(controllerClass);
                 for (Map.Entry<UrlMethod, Method> entry : classMappings.entrySet()) {
-                    if (urlMappings.containsKey(entry.getKey())) {
-                        Method existing = urlMappings.get(entry.getKey());
+                    if (urlToMethodMappings.containsKey(entry.getKey())) {
+                        Method existing = urlToMethodMappings.get(entry.getKey());
                         throw new ServletException(
                                 "UrlMapping dupliqué : " + entry.getKey()
                                 + " (déjà déclaré dans " + existing.getDeclaringClass().getName()
@@ -152,11 +153,11 @@ public class FrontServlet extends HttpServlet {
                                 + entry.getValue().getDeclaringClass().getName()
                                 + "." + entry.getValue().getName());
                     }
-                    urlMappings.put(entry.getKey(), entry.getValue());
+                    urlToMethodMappings.put(entry.getKey(), entry.getValue());
                 }
             }
 
-            getServletContext().setAttribute("urlMappings", urlMappings);
+            getServletContext().setAttribute("urlToMethodMappings", urlToMethodMappings);
         } catch (ServletException e) {
             getServletContext().setAttribute("initError", e.getMessage());
             throw e;
@@ -229,10 +230,21 @@ public class FrontServlet extends HttpServlet {
         }
 
         // Sprint 10 : protection par authentification.
-        if (method.isAnnotationPresent(AuthRequired.class)) {
+        if (method.isAnnotationPresent(AuthRequired.class) || method.isAnnotationPresent(RoleRequired.class)) {
             if (!isAuthenticated(req)) {
                 try {
                     res.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Authentification requise");
+                } catch (Exception ignored) {
+                }
+                return;
+            }
+        }
+
+        // Sprint 10 bis : controle des roles.
+        if (method.isAnnotationPresent(RoleRequired.class)) {
+            if (!hasRequiredRole(method, req)) {
+                try {
+                    res.sendError(HttpServletResponse.SC_FORBIDDEN, "Role insuffisant");
                 } catch (Exception ignored) {
                 }
                 return;
@@ -279,14 +291,14 @@ public class FrontServlet extends HttpServlet {
     }
 
     protected Method getMethodForUrl(String path, String httpMethod) {
-        if (urlMappings == null) {
+        if (urlToMethodMappings == null) {
             return null;
         }
-        return urlMappings.get(new UrlMethod(path, httpMethod));
+        return urlToMethodMappings.get(new UrlMethod(path, httpMethod));
     }
 
     protected Map<UrlMethod, Method> getAllMappings() {
-        return urlMappings;
+        return urlToMethodMappings;
     }
 
     protected Object getControllerInstance(String className) {
@@ -333,8 +345,24 @@ public class FrontServlet extends HttpServlet {
         }
     }
 
+    private boolean isUserType(Class<?> type) {
+        if (type == null) {
+            return false;
+        }
+        if (type.getSimpleName().equals("User")) {
+            return true;
+        }
+        for (java.lang.reflect.Method method : type.getDeclaredMethods()) {
+            if (method.getName().equals("getRoles") || method.getName().equals("getUsername")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public boolean isProtected(Method method) {
-        return method != null && method.isAnnotationPresent(AuthRequired.class);
+        return method != null && (method.isAnnotationPresent(AuthRequired.class)
+                || method.isAnnotationPresent(RoleRequired.class));
     }
 
     public boolean requiresAuth(Method method) {
@@ -432,6 +460,152 @@ public class FrontServlet extends HttpServlet {
         response.sendError(HttpServletResponse.SC_NO_CONTENT);
     }
 
+    /**
+     * Verifie que l'utilisateur authentifie possede au moins un des roles requis.
+     */
+    public boolean hasRequiredRole(Method method, HttpServletRequest request) {
+        return hasRequiredRole(method, request, null);
+    }
+
+    public boolean hasRequiredRole(Method method, HttpServletRequest request, HttpServletResponse response) {
+        if (method == null || !method.isAnnotationPresent(RoleRequired.class)) {
+            return true;
+        }
+        RoleRequired annotation = method.getAnnotation(RoleRequired.class);
+        String[] requiredRoles = annotation.value();
+        if (requiredRoles == null || requiredRoles.length == 0) {
+            return true;
+        }
+
+        Object user = getAuthenticatedUser(request, response);
+        List<String> userRoles = getUserRoles(user);
+        if (userRoles.isEmpty()) {
+            return false;
+        }
+
+        for (String required : requiredRoles) {
+            if (required == null || required.isBlank()) {
+                continue;
+            }
+            for (String userRole : userRoles) {
+                if (userRole != null && userRole.equalsIgnoreCase(required.trim())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Recupere l'utilisateur authentifie depuis la session.
+     */
+    private Object getAuthenticatedUser(HttpServletRequest request, HttpServletResponse response) {
+        if (request == null) {
+            return null;
+        }
+        String attr = (authSessionAttribute == null || authSessionAttribute.isBlank())
+                ? "connecte" : authSessionAttribute;
+        Object session = null;
+        try {
+            session = getSessionManager().getOrCreate(request, response);
+        } catch (Exception ignored) {
+            return null;
+        }
+        if (session == null) {
+            return null;
+        }
+        try {
+            java.lang.reflect.Method getter = session.getClass().getMethod("getAttribute", String.class);
+            return getter.invoke(session, attr);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Extrait les roles d'un utilisateur authentifie.
+     * Supporte : getRoles(), getRole(), Collection/tableau, enum, chaine.
+     */
+    public List<String> getUserRoles(Object user) {
+        List<String> roles = new ArrayList<>();
+        if (user == null) {
+            return roles;
+        }
+
+        // Objet avec getRoles()
+        try {
+            java.lang.reflect.Method getter = user.getClass().getMethod("getRoles");
+            Object result = getter.invoke(user);
+            addRolesFromObject(roles, result);
+            if (!roles.isEmpty()) {
+                return roles;
+            }
+        } catch (Exception ignored) {
+        }
+
+        // Objet avec getRole()
+        try {
+            java.lang.reflect.Method getter = user.getClass().getMethod("getRole");
+            Object result = getter.invoke(user);
+            addRolesFromObject(roles, result);
+            if (!roles.isEmpty()) {
+                return roles;
+            }
+        } catch (Exception ignored) {
+        }
+
+        // L'utilisateur lui-meme est un role (chaine/enum)
+        addRolesFromObject(roles, user);
+        return roles;
+    }
+
+    private void addRolesFromObject(List<String> roles, Object value) {
+        if (value == null) {
+            return;
+        }
+        if (value instanceof CharSequence) {
+            String role = value.toString().trim();
+            if (!role.isEmpty()) {
+                roles.add(role);
+            }
+            return;
+        }
+        if (value instanceof Enum<?> enumValue) {
+            roles.add(enumValue.name());
+            return;
+        }
+        if (value.getClass().isArray()) {
+            int length = java.lang.reflect.Array.getLength(value);
+            for (int i = 0; i < length; i++) {
+                addRolesFromObject(roles, java.lang.reflect.Array.get(value, i));
+            }
+            return;
+        }
+        if (value instanceof Iterable<?> iterable) {
+            for (Object item : iterable) {
+                addRolesFromObject(roles, item);
+            }
+            return;
+        }
+        // Objet avec getName()/name() pour un role encapsule
+        try {
+            java.lang.reflect.Method getName = value.getClass().getMethod("getName");
+            Object name = getName.invoke(value);
+            if (name != null) {
+                addRolesFromObject(roles, name);
+                if (!roles.isEmpty()) {
+                    return;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        // Dernier recours : toString() si ce n'est pas un objet utilisateur complexe.
+        String text = value.toString();
+        if (text != null && !text.isBlank() && !text.contains("@")) {
+            roles.add(text.trim());
+        }
+    }
+
     private void renderControllerIndex(HttpServletResponse res) throws IOException {
         List<String> controllers = new ArrayList<>();
         for (Class<?> clazz : applicationContext.getBeanClasses()) {
@@ -459,8 +633,12 @@ public class FrontServlet extends HttpServlet {
 
     private Object[] buildArguments(Method method, HttpServletRequest req, HttpServletResponse res)
             throws ServletException {
-        if (method != null && method.isAnnotationPresent(AuthRequired.class) && !isAuthenticated(req)) {
+        if (method != null && (method.isAnnotationPresent(AuthRequired.class)
+                || method.isAnnotationPresent(RoleRequired.class)) && !isAuthenticated(req)) {
             throw new ServletException("Authentification requise");
+        }
+        if (method != null && method.isAnnotationPresent(RoleRequired.class) && !hasRequiredRole(method, req)) {
+            throw new ServletException("Role insuffisant");
         }
         Parameter[] parameters = method.getParameters();
         Object[] arguments = new Object[parameters.length];
@@ -501,6 +679,11 @@ public class FrontServlet extends HttpServlet {
         if (parameterType.getSimpleName().equals("Session")
                 || SessionHandle.class.isAssignableFrom(parameterType)) {
             return getSessionManager().getOrCreate(req, res, parameterType);
+        }
+
+        // Sprint 10 bis : injection automatique du profil User connecte.
+        if (isUserType(parameterType)) {
+            return getAuthenticatedUser(req, res);
         }
 
         // Sprint 7 : type simple non annote -> nom du parametre (flag -parameters),

@@ -35,21 +35,21 @@ public class SessionManager {
         }
     }
 
-    private final ConcurrentHashMap<String, Map<String, Object>> attributesById =
+    private final ConcurrentHashMap<String, Map<String, Object>> sessionAttributesById =
             new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> lastAccessedById = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Integer> timeoutById = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, ConcurrentHashMap<Class<?>, Object>> sessionsByIdType =
+    private final ConcurrentHashMap<String, Long> lastAccessedTimeById = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Integer> inactiveTimeoutById = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConcurrentHashMap<Class<?>, Object>> sessionInstancesById =
             new ConcurrentHashMap<>();
 
-    private volatile int defaultMaxInactiveIntervalSeconds = 30 * 60;
+    private volatile int defaultSessionTimeoutSeconds = 30 * 60;
     private final SecureRandom random = new SecureRandom();
 
     private final ScheduledExecutorService cleaner;
 
     public SessionManager(int defaultTimeoutSeconds) {
         if (defaultTimeoutSeconds > 0) {
-            this.defaultMaxInactiveIntervalSeconds = defaultTimeoutSeconds;
+            this.defaultSessionTimeoutSeconds = defaultTimeoutSeconds;
         }
         this.cleaner = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "framework-session-cleaner");
@@ -64,12 +64,12 @@ public class SessionManager {
     }
 
     public int getDefaultMaxInactiveIntervalSeconds() {
-        return defaultMaxInactiveIntervalSeconds;
+        return defaultSessionTimeoutSeconds;
     }
 
     public void setDefaultMaxInactiveIntervalSeconds(int seconds) {
         if (seconds > 0) {
-            defaultMaxInactiveIntervalSeconds = seconds;
+            defaultSessionTimeoutSeconds = seconds;
         }
     }
 
@@ -83,17 +83,17 @@ public class SessionManager {
         long now = System.currentTimeMillis();
 
         String id = requestedId;
-        if (id == null || !attributesById.containsKey(id)) {
+        if (id == null || !sessionAttributesById.containsKey(id)) {
             id = generateId();
         } else {
-            Long last = lastAccessedById.get(id);
-            int timeout = timeoutById.getOrDefault(id, defaultMaxInactiveIntervalSeconds);
+            Long last = lastAccessedTimeById.get(id);
+            int timeout = inactiveTimeoutById.getOrDefault(id, defaultSessionTimeoutSeconds);
             if (last != null && (now - last) / 1000L > timeout) {
                 doRemoveSession(id);
                 id = generateId();
             } else {
                 // Verifie l'expiration au niveau de l'instance.
-                ConcurrentHashMap<Class<?>, Object> tm = sessionsByIdType.get(id);
+                ConcurrentHashMap<Class<?>, Object> tm = sessionInstancesById.get(id);
                 if (tm != null) {
                     for (Object s : tm.values()) {
                         if (s instanceof SessionHandle handle && handle.isExpired()) {
@@ -106,28 +106,28 @@ public class SessionManager {
             }
         }
 
-        attributesById.putIfAbsent(id, new ConcurrentHashMap<>());
-        lastAccessedById.put(id, now);
+        sessionAttributesById.putIfAbsent(id, new ConcurrentHashMap<>());
+        lastAccessedTimeById.put(id, now);
 
         ConcurrentHashMap<Class<?>, Object> typeMap =
-                sessionsByIdType.computeIfAbsent(id, k -> new ConcurrentHashMap<>());
+                sessionInstancesById.computeIfAbsent(id, k -> new ConcurrentHashMap<>());
         Object session = typeMap.get(sessionType);
         if (session == null) {
-            session = newInstance(sessionType, id, attributesById.get(id), this);
+            session = newInstance(sessionType, id, sessionAttributesById.get(id), this);
             if (session != null) {
                 typeMap.put(sessionType, session);
-                timeoutById.put(id, extractTimeout(session));
+                inactiveTimeoutById.put(id, extractTimeout(session));
             }
         } else if (session instanceof SessionHandle handle && handle.isExpired()) {
             doRemoveSession(id);
             id = generateId();
-            attributesById.putIfAbsent(id, new ConcurrentHashMap<>());
-            lastAccessedById.put(id, now);
-            typeMap = sessionsByIdType.computeIfAbsent(id, k -> new ConcurrentHashMap<>());
-            session = newInstance(sessionType, id, attributesById.get(id), this);
+            sessionAttributesById.putIfAbsent(id, new ConcurrentHashMap<>());
+            lastAccessedTimeById.put(id, now);
+            typeMap = sessionInstancesById.computeIfAbsent(id, k -> new ConcurrentHashMap<>());
+            session = newInstance(sessionType, id, sessionAttributesById.get(id), this);
             if (session != null) {
                 typeMap.put(sessionType, session);
-                timeoutById.put(id, extractTimeout(session));
+                inactiveTimeoutById.put(id, extractTimeout(session));
             }
         }
 
@@ -171,16 +171,16 @@ public class SessionManager {
     }
 
     public Object getSessionById(String id) {
-        if (id == null || !attributesById.containsKey(id)) {
+        if (id == null || !sessionAttributesById.containsKey(id)) {
             return null;
         }
-        Long last = lastAccessedById.get(id);
-        int timeout = timeoutById.getOrDefault(id, defaultMaxInactiveIntervalSeconds);
+        Long last = lastAccessedTimeById.get(id);
+        int timeout = inactiveTimeoutById.getOrDefault(id, defaultSessionTimeoutSeconds);
         if (last != null && (System.currentTimeMillis() - last) / 1000L > timeout) {
             doRemoveSession(id);
             return null;
         }
-        ConcurrentHashMap<Class<?>, Object> typeMap = sessionsByIdType.get(id);
+        ConcurrentHashMap<Class<?>, Object> typeMap = sessionInstancesById.get(id);
         if (typeMap == null || typeMap.isEmpty()) {
             return null;
         }
@@ -239,27 +239,27 @@ public class SessionManager {
     }
 
     public void touchSession(String id) {
-        if (id != null && attributesById.containsKey(id)) {
-            lastAccessedById.put(id, System.currentTimeMillis());
+        if (id != null && sessionAttributesById.containsKey(id)) {
+            lastAccessedTimeById.put(id, System.currentTimeMillis());
         }
     }
 
     public void setLastAccessedTime(String id, long time) {
-        if (id != null && attributesById.containsKey(id)) {
-            lastAccessedById.put(id, time);
+        if (id != null && sessionAttributesById.containsKey(id)) {
+            lastAccessedTimeById.put(id, time);
         }
     }
 
     public void cleanupExpired() {
         long now = System.currentTimeMillis();
-        for (String id : new ArrayList<>(attributesById.keySet())) {
+        for (String id : new ArrayList<>(sessionAttributesById.keySet())) {
             boolean expired = false;
-            Long last = lastAccessedById.get(id);
-            int timeout = timeoutById.getOrDefault(id, defaultMaxInactiveIntervalSeconds);
+            Long last = lastAccessedTimeById.get(id);
+            int timeout = inactiveTimeoutById.getOrDefault(id, defaultSessionTimeoutSeconds);
             if (last != null && (now - last) / 1000L > timeout) {
                 expired = true;
             }
-            ConcurrentHashMap<Class<?>, Object> typeMap = sessionsByIdType.get(id);
+            ConcurrentHashMap<Class<?>, Object> typeMap = sessionInstancesById.get(id);
             if (typeMap != null) {
                 for (Object s : typeMap.values()) {
                     if (s instanceof SessionHandle handle && handle.isExpired()) {
@@ -275,16 +275,16 @@ public class SessionManager {
     }
 
     public Set<String> getSessionIds() {
-        return attributesById.keySet();
+        return sessionAttributesById.keySet();
     }
 
     public int size() {
-        return attributesById.size();
+        return sessionAttributesById.size();
     }
 
     public void setMaxInactiveInterval(String id, int seconds) {
         if (id != null && seconds > 0) {
-            timeoutById.put(id, seconds);
+            inactiveTimeoutById.put(id, seconds);
         }
     }
 
@@ -297,7 +297,7 @@ public class SessionManager {
             }
         } catch (Exception ignored) {
         }
-        return defaultMaxInactiveIntervalSeconds;
+        return defaultSessionTimeoutSeconds;
     }
 
     private void doRemoveSession(String id) {
@@ -305,7 +305,7 @@ public class SessionManager {
             return;
         }
         // Invalide les instances.
-        ConcurrentHashMap<Class<?>, Object> typeMap = sessionsByIdType.get(id);
+        ConcurrentHashMap<Class<?>, Object> typeMap = sessionInstancesById.get(id);
         if (typeMap != null) {
             for (Object s : typeMap.values()) {
                 if (s instanceof SessionHandle handle && !handle.isInvalidated()) {
@@ -316,10 +316,10 @@ public class SessionManager {
                 }
             }
         }
-        attributesById.remove(id);
-        lastAccessedById.remove(id);
-        sessionsByIdType.remove(id);
-        timeoutById.remove(id);
+        sessionAttributesById.remove(id);
+        lastAccessedTimeById.remove(id);
+        sessionInstancesById.remove(id);
+        inactiveTimeoutById.remove(id);
     }
 
     private String resolveRequestedId(HttpServletRequest request) {
@@ -328,7 +328,7 @@ public class SessionManager {
         }
         try {
             String id = request.getRequestedSessionId();
-            if (isValidId(id) && attributesById.containsKey(id)) {
+            if (isValidId(id) && sessionAttributesById.containsKey(id)) {
                 return id;
             }
         } catch (Exception ignored) {
@@ -348,7 +348,7 @@ public class SessionManager {
                             || name.equalsIgnoreCase("FWSESSIONID")
                             || name.toUpperCase().contains("SESSION"))) {
                         String value = cookie.getValue();
-                        if (isValidId(value) && attributesById.containsKey(value)) {
+                        if (isValidId(value) && sessionAttributesById.containsKey(value)) {
                             return value;
                         }
                     }
@@ -362,7 +362,7 @@ public class SessionManager {
             if (httpSession != null) {
                 Method getId = httpSession.getClass().getMethod("getId");
                 Object result = getId.invoke(httpSession);
-                if (result instanceof String id && isValidId(id) && attributesById.containsKey(id)) {
+                if (result instanceof String id && isValidId(id) && sessionAttributesById.containsKey(id)) {
                     return id;
                 }
             }
@@ -373,7 +373,7 @@ public class SessionManager {
                 "frameworkSessionId"}) {
             try {
                 Object value = request.getAttribute(attr);
-                if (value instanceof String id && isValidId(id) && attributesById.containsKey(id)) {
+                if (value instanceof String id && isValidId(id) && sessionAttributesById.containsKey(id)) {
                     return id;
                 }
             } catch (Exception ignored) {
@@ -384,7 +384,7 @@ public class SessionManager {
                 "frameworkSessionId"}) {
             try {
                 String value = request.getParameter(param);
-                if (isValidId(value) && attributesById.containsKey(value)) {
+                if (isValidId(value) && sessionAttributesById.containsKey(value)) {
                     return value;
                 }
             } catch (Exception ignored) {

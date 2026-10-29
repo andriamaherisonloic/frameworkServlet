@@ -2,18 +2,21 @@ package mapping;
 
 import java.util.Objects;
 
+/**
+ * Cle d'association entre une URL et une methode HTTP.
+ */
 public class UrlMethod {
 
     private String url;
-    private String method;
+    private String httpMethod;
 
     public UrlMethod() {
-        this.method = "GET";
+        this.httpMethod = "GET";
     }
 
-    public UrlMethod(String url, String method) {
+    public UrlMethod(String url, String httpMethod) {
         this.url = url;
-        this.method = method != null ? method.toUpperCase() : "GET";
+        this.httpMethod = normalizeHttpMethod(httpMethod);
     }
 
     public String getUrl() {
@@ -25,32 +28,35 @@ public class UrlMethod {
     }
 
     public String getMethod() {
-        return method;
+        return httpMethod;
     }
 
-    public void setMethod(String method) {
-        this.method = method != null ? method.toUpperCase() : "GET";
+    public void setMethod(String httpMethod) {
+        this.httpMethod = normalizeHttpMethod(httpMethod);
+    }
+
+    private String normalizeHttpMethod(String method) {
+        return method == null ? "GET" : method.toUpperCase();
     }
 
     @Override
-    public boolean equals(Object o) {
-        if (this == o) {
+    public boolean equals(Object other) {
+        if (this == other) {
             return true;
         }
-        if (!(o instanceof UrlMethod)) {
+        if (!(other instanceof UrlMethod that)) {
             return false;
         }
-        UrlMethod that = (UrlMethod) o;
-        return Objects.equals(url, that.url) && Objects.equals(method, that.method);
+        return Objects.equals(url, that.url) && Objects.equals(httpMethod, that.httpMethod);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(url, method);
+        return Objects.hash(url, httpMethod);
     }
 
     @Override
     public String toString() {
-        return "[" + method + "] " + url;
+        return "[" + httpMethod + "] " + url;
     }
 }
