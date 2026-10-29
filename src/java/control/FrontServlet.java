@@ -345,6 +345,21 @@ public class FrontServlet extends HttpServlet {
         }
     }
 
+    private boolean isUserType(Class<?> type) {
+        if (type == null) {
+            return false;
+        }
+        if (type.getSimpleName().equals("User")) {
+            return true;
+        }
+        for (java.lang.reflect.Method method : type.getDeclaredMethods()) {
+            if (method.getName().equals("getRoles") || method.getName().equals("getUsername")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public boolean isProtected(Method method) {
         return method != null && (method.isAnnotationPresent(AuthRequired.class)
                 || method.isAnnotationPresent(RoleRequired.class));
@@ -664,6 +679,11 @@ public class FrontServlet extends HttpServlet {
         if (parameterType.getSimpleName().equals("Session")
                 || SessionHandle.class.isAssignableFrom(parameterType)) {
             return getSessionManager().getOrCreate(req, res, parameterType);
+        }
+
+        // Sprint 10 bis : injection automatique du profil User connecte.
+        if (isUserType(parameterType)) {
+            return getAuthenticatedUser(req, res);
         }
 
         // Sprint 7 : type simple non annote -> nom du parametre (flag -parameters),
